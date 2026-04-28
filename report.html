@@ -64,7 +64,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, onSnapshot, doc, getDocs, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, doc, getDoc, getDocs, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase Config
         let firebaseConfig = {};
@@ -89,6 +89,10 @@
 
         // State
         let loadedTokens = []; 
+        let dailyRates = {
+            "Sunday": 0, "Monday": 0, "Tuesday": 0, "Wednesday": 0,
+            "Thursday": 0, "Friday": 0, "Saturday": 0
+        };
         
         const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
         const STATS_CACHE_KEY = `ent_report_stats_${appId}`;
@@ -105,6 +109,16 @@
         
         function getTodayStr() { return new Date().toISOString().split('T')[0]; }
         function getCurrentMonthStartStr() { return getTodayStr().substring(0, 7) + '-01'; }
+        function getDayName(dateString) {
+            if (!dateString) return '';
+            const parts = dateString.split('-');
+            if (parts.length === 3) {
+                const date = new Date(parts[0], parts[1] - 1, parts[2]);
+                const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                return days[date.getDay()];
+            }
+            return '';
+        }
 
         window.showToast = (message, type = 'success') => {
             const container = document.getElementById('toast-container');
@@ -120,10 +134,10 @@
             }, 3000);
         };
 
-        // --- FIXED: True Loading Percentage System for Main Boot Screen ---
+        // --- True Loading Percentage System ---
         let currentLoadPercent = 0;
         window.setRealLoadingProgress = (percent, textStatus) => {
-            if (currentLoadPercent >= 100) return; // Prevent backtracking
+            if (currentLoadPercent >= 100) return; 
             currentLoadPercent = percent;
             
             const bar = document.getElementById('main-loading-bar');
@@ -146,11 +160,11 @@
                             renderReportDashboard();
                         }, 500);
                     }
-                }, 600); // slight delay to show 100% cleanly
+                }, 600); 
             }
         };
 
-        // --- FIXED: Reliable Top-Right Live Sync Animation (No getting stuck) ---
+        // --- Live Sync Animation ---
         let syncTimeout;
         function triggerSyncAnimation() {
             const indicator = document.getElementById('sync-indicator');
@@ -158,26 +172,20 @@
             const el = document.getElementById('sync-percent');
             
             if (!indicator || !bar || !el) return;
-            
-            // Prevent restarting/overlapping if currently animating
             if (!indicator.classList.contains('hidden')) return;
             
             indicator.classList.remove('hidden');
             indicator.classList.add('flex');
             
-            // Reset to 0% immediately
             bar.style.transition = 'none';
             bar.style.width = '0%';
             el.textContent = '0%';
             
-            // Force browser reflow to reset CSS transition
             void bar.offsetWidth;
             
-            // Smooth CSS sweep to 100%
             bar.style.transition = 'width 0.8s ease-out';
             bar.style.width = '100%';
             
-            // Animate numbers
             let p = 0;
             const fastInterval = setInterval(() => {
                 p += 20;
@@ -188,13 +196,12 @@
                 el.textContent = p + '%';
             }, 100);
 
-            // Clean hide fallback
             clearTimeout(syncTimeout);
             syncTimeout = setTimeout(() => {
                 indicator.classList.add('hidden');
                 indicator.classList.remove('flex');
                 clearInterval(fastInterval);
-            }, 1500); // Reliably vanishes after 1.5s
+            }, 1500); 
         }
 
         const initAuth = async () => {
@@ -245,7 +252,7 @@
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
-                window.setRealLoadingProgress(35, 'Verifying Credentials');
+                window.setRealLoadingProgress(30, 'Verifying Credentials');
                 
                 if (!didInstantBoot) {
                     const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
@@ -277,19 +284,38 @@
                     if (!docSnap.exists() || docSnap.data().status !== 'ACTIVE') {
                         window.location.href = 'index.html';
                     }
-                    if (!initialRenderDone) window.setRealLoadingProgress(70, 'Establishing Link');
+                    if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
                 }, (err) => console.error("System User fetch error:", err));
             } else {
-                if (!initialRenderDone) window.setRealLoadingProgress(70, 'Establishing Link');
+                if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
             }
 
-            // 2. SPEED OPTIMIZATION: Load ONLY current month's tokens for the live dashboard
+            // 2. Fetch Meal Prices (CRITICAL FIX: Restored so costs calculate properly)
+            const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'meal_prices');
+            onSnapshot(settingsRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    if (data.prices) dailyRates = data.prices;
+                    else if (data.dailyRates) dailyRates = data.dailyRates;
+                }
+                if (!initialRenderDone) window.setRealLoadingProgress(60, 'Loading Financials');
+                else renderReportDashboard();
+            }, (err) => console.error("Prices fetch error:", err));
+
+            // 3. Ultra-Fast Memory Filter: Fetch all tokens but drop dead data instantly
             const currentMonthStart = getCurrentMonthStartStr();
-            const qTokens = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', currentMonthStart));
+            const tokensRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
             
-            onSnapshot(qTokens, (snap) => {
+            onSnapshot(tokensRef, (snap) => {
                 loadedTokens = [];
-                snap.forEach(doc => { loadedTokens.push({ id: doc.id, ...doc.data() }); });
+                snap.forEach(doc => { 
+                    const data = doc.data();
+                    const dateStr = data.issuedDate || data.date;
+                    // Strict client-side filter drops dead data instantly, highly reliable vs backend queries
+                    if (dateStr && dateStr >= currentMonthStart) {
+                        loadedTokens.push({ id: doc.id, ...data }); 
+                    }
+                });
                 
                 if (!initialRenderDone) {
                     window.setRealLoadingProgress(100, 'Intelligence Loaded');
@@ -338,11 +364,20 @@
             });
 
             sortedTokens.forEach(data => {
-                const cost = data.costs?.total || data.costApplied || 0;
-                const isConsumed = data.status === 'CONSUMED' || data.mealRedeemed === true;
+                const isConsumed = data.status === 'CONSUMED' || data.status === 'REDEEMED' || data.mealRedeemed === true;
                 const dateStr = data.issuedDate || data.date;
                 
                 if (!dateStr) return;
+
+                // Calculate Cost accurately
+                let cost = 0;
+                if (data.costs && typeof data.costs.total === 'number') {
+                    cost = data.costs.total;
+                } else if (data.costApplied) {
+                    cost = data.costApplied;
+                } else {
+                    cost = parseFloat(dailyRates[getDayName(dateStr)]) || 0;
+                }
 
                 if (dateStr.startsWith(currentMonthStr)) {
                     mIssued++;
@@ -438,7 +473,7 @@
             container.innerHTML = '';
             
             const total = Object.values(stats).reduce((a,b)=>a+b, 0) || 1;
-            const sortedKeys = Object.keys(stats).sort((a,b) => stats[b] - stats[a]).slice(0, 5); // Top 5
+            const sortedKeys = Object.keys(stats).sort((a,b) => stats[b] - stats[a]).slice(0, 5); 
 
             if (sortedKeys.length === 0) {
                 container.innerHTML = '<div class="text-xs text-slate-500 italic py-4">No financial data available for current month.</div>';
@@ -471,7 +506,6 @@
         async function fetchTokensForDateRange(startDate, endDate) {
             const currentMonthStart = getCurrentMonthStartStr();
             
-            // If entirely within the current month, grab from fast memory
             if (startDate >= currentMonthStart) {
                 return loadedTokens.filter(t => {
                     const dateStr = t.issuedDate || t.date;
@@ -479,15 +513,13 @@
                 });
             }
             
-            // Otherwise securely fetch history
-            const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', startDate));
-            const snap = await getDocs(q);
-            
+            // Securely fetch history for older reports
+            const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'));
             let results = [];
             snap.forEach(doc => {
                 const data = doc.data();
                 const dateStr = data.issuedDate || data.date;
-                if (dateStr <= endDate) {
+                if (dateStr >= startDate && dateStr <= endDate) {
                     results.push(data);
                 }
             });
@@ -537,9 +569,17 @@
 
                 targetTokens.forEach(log => {
                     const isConsumed = log.status === 'CONSUMED' || log.status === 'REDEEMED' || log.mealRedeemed === true;
-                    const cost = log.costs?.total || log.costApplied || 0;
-                    const dateStr = log.issuedDate || log.date;
                     
+                    let cost = 0;
+                    if (log.costs && typeof log.costs.total === 'number') {
+                        cost = log.costs.total;
+                    } else if (log.costApplied) {
+                        cost = log.costApplied;
+                    } else {
+                        cost = parseFloat(dailyRates[getDayName(log.issuedDate || log.date)]) || 0;
+                    }
+
+                    const dateStr = log.issuedDate || log.date;
                     const dept = log.dept || log.department || '';
                     const acct = log.accountName || log.account || 'CTE';
                     const comp = log.companyName || log.company || '';
@@ -665,7 +705,11 @@
                     const dateStr = log.issuedDate || log.date;
                     const timeStr = log.issuedAt ? new Date(log.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
                     const statusStr = isConsumed ? 'REDEEMED' : 'CLEARED';
-                    const cost = log.costs?.total || log.costApplied || 0;
+                    
+                    let cost = 0;
+                    if (log.costs && typeof log.costs.total === 'number') cost = log.costs.total;
+                    else if (log.costApplied) cost = log.costApplied;
+                    else cost = parseFloat(dailyRates[getDayName(dateStr)]) || 0;
 
                     const row = [
                         `"${dateStr}"`, 
