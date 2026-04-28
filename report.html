@@ -88,7 +88,7 @@
         const appId = (typeof __app_id !== 'undefined') ? __app_id : 'canteen-os-live';
 
         // State
-        let loadedTokens = []; // Holds ONLY current month's tokens for ultra-fast performance
+        let loadedTokens = []; 
         
         const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
         const STATS_CACHE_KEY = `ent_report_stats_${appId}`;
@@ -120,42 +120,85 @@
             }, 3000);
         };
 
-        // --- Visual Live Sync Progress Animation ---
-        window.syncAnimating = false;
-        function triggerSyncAnimation() {
-            const el = document.getElementById('sync-percent');
-            const bar = document.getElementById('sync-progress-bar');
-            const indicator = document.getElementById('sync-indicator');
+        // --- FIXED: True Loading Percentage System for Main Boot Screen ---
+        let currentLoadPercent = 0;
+        window.setRealLoadingProgress = (percent, textStatus) => {
+            if (currentLoadPercent >= 100) return; // Prevent backtracking
+            currentLoadPercent = percent;
             
-            if (!el || !bar || !indicator) return;
-            if (!indicator.classList.contains('hidden') && window.syncAnimating) return;
+            const bar = document.getElementById('main-loading-bar');
+            const pct = document.getElementById('main-loading-percent');
+            const txt = document.getElementById('main-loading-text');
+            
+            if (bar) bar.style.width = percent + '%';
+            if (pct) pct.textContent = percent;
+            if (txt && textStatus) txt.textContent = textStatus;
+            
+            if (percent >= 100) {
+                setTimeout(() => {
+                    const loader = document.getElementById('view-loading');
+                    if (loader) {
+                        loader.classList.add('opacity-0');
+                        setTimeout(() => {
+                            loader.classList.add('hidden');
+                            document.getElementById('view-report').classList.remove('hidden');
+                            initialRenderDone = true;
+                            renderReportDashboard();
+                        }, 500);
+                    }
+                }, 600); // slight delay to show 100% cleanly
+            }
+        };
+
+        // --- FIXED: Reliable Top-Right Live Sync Animation (No getting stuck) ---
+        let syncTimeout;
+        function triggerSyncAnimation() {
+            const indicator = document.getElementById('sync-indicator');
+            const bar = document.getElementById('sync-progress-bar');
+            const el = document.getElementById('sync-percent');
+            
+            if (!indicator || !bar || !el) return;
+            
+            // Prevent restarting/overlapping if currently animating
+            if (!indicator.classList.contains('hidden')) return;
             
             indicator.classList.remove('hidden');
             indicator.classList.add('flex');
-            window.syncAnimating = true;
             
-            let p = 0;
-            el.textContent = '0%';
+            // Reset to 0% immediately
+            bar.style.transition = 'none';
             bar.style.width = '0%';
+            el.textContent = '0%';
             
-            clearInterval(window.syncInterval);
-            window.syncInterval = setInterval(() => {
-                p += Math.floor(Math.random() * 30) + 15; 
-                if (p >= 100) {
+            // Force browser reflow to reset CSS transition
+            void bar.offsetWidth;
+            
+            // Smooth CSS sweep to 100%
+            bar.style.transition = 'width 0.8s ease-out';
+            bar.style.width = '100%';
+            
+            // Animate numbers
+            let p = 0;
+            const fastInterval = setInterval(() => {
+                p += 20;
+                if(p >= 100) {
                     p = 100;
-                    clearInterval(window.syncInterval);
-                    setTimeout(() => {
-                        indicator.classList.add('hidden');
-                        indicator.classList.remove('flex');
-                        window.syncAnimating = false;
-                    }, 800); 
+                    clearInterval(fastInterval);
                 }
                 el.textContent = p + '%';
-                bar.style.width = p + '%';
-            }, 30);
+            }, 100);
+
+            // Clean hide fallback
+            clearTimeout(syncTimeout);
+            syncTimeout = setTimeout(() => {
+                indicator.classList.add('hidden');
+                indicator.classList.remove('flex');
+                clearInterval(fastInterval);
+            }, 1500); // Reliably vanishes after 1.5s
         }
 
         const initAuth = async () => {
+            window.setRealLoadingProgress(10, 'Initializing Security Node');
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
@@ -168,18 +211,6 @@
         window.goToDashboard = () => {
             window.location.href = 'index.html';
         };
-
-        function checkDataLoaded() {
-            if (isSysUsersLoaded && isTokensLoaded) {
-                renderReportDashboard();
-                
-                if (!initialRenderDone) {
-                    document.getElementById('view-loading').classList.add('hidden');
-                    document.getElementById('view-report').classList.remove('hidden');
-                    initialRenderDone = true;
-                }
-            }
-        }
 
         // Fast Boot from Memory Cache
         const checkInstantBoot = () => {
@@ -204,6 +235,7 @@
                 document.getElementById('rpt-start').value = getTodayStr();
                 document.getElementById('rpt-end').value = getTodayStr();
                 
+                initialRenderDone = true;
                 return true;
             }
             return false;
@@ -213,6 +245,8 @@
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
+                window.setRealLoadingProgress(35, 'Verifying Credentials');
+                
                 if (!didInstantBoot) {
                     const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
                     if (sessionStr) {
@@ -243,10 +277,10 @@
                     if (!docSnap.exists() || docSnap.data().status !== 'ACTIVE') {
                         window.location.href = 'index.html';
                     }
-                    isSysUsersLoaded = true; checkDataLoaded();
+                    if (!initialRenderDone) window.setRealLoadingProgress(70, 'Establishing Link');
                 }, (err) => console.error("System User fetch error:", err));
             } else {
-                isSysUsersLoaded = true; checkDataLoaded();
+                if (!initialRenderDone) window.setRealLoadingProgress(70, 'Establishing Link');
             }
 
             // 2. SPEED OPTIMIZATION: Load ONLY current month's tokens for the live dashboard
@@ -257,10 +291,9 @@
                 loadedTokens = [];
                 snap.forEach(doc => { loadedTokens.push({ id: doc.id, ...doc.data() }); });
                 
-                isTokensLoaded = true;
-                checkDataLoaded();
-                
-                if (initialRenderDone) {
+                if (!initialRenderDone) {
+                    window.setRealLoadingProgress(100, 'Intelligence Loaded');
+                } else {
                     renderReportDashboard();
                     triggerSyncAnimation();
                 }
@@ -288,7 +321,6 @@
             const compStats = {};
             const siteStats = {};
 
-            // Initialize last 7 days
             for (let i=6; i>=0; i--) {
                 const d = new Date(); d.setDate(d.getDate() - i);
                 dailyStats[d.toISOString().split('T')[0]] = 0;
@@ -299,7 +331,6 @@
 
             let tableCount = 0;
             
-            // Sort by latest
             const sortedTokens = [...loadedTokens].sort((a,b) => {
                 const timeA = a.issuedAt?.seconds || 0;
                 const timeB = b.issuedAt?.seconds || 0;
@@ -322,7 +353,6 @@
                     tIssued++;
                     if (isConsumed) { tValue += cost; tRedeemed++; }
                     
-                    // Live Feed (Today only)
                     if(tbody && tableCount < 100) {
                         const tr = document.createElement('tr');
                         tr.className = 'hover:bg-slate-800/30 border-b border-slate-700/50 last:border-0 transition-colors animate-fade-in';
@@ -348,7 +378,6 @@
                     }
                 }
 
-                // Distributions (Only count consumed meals)
                 if (isConsumed) {
                     if (dailyStats.hasOwnProperty(dateStr)) dailyStats[dateStr] += cost;
 
@@ -439,11 +468,10 @@
         //  REPORTS & EXPORTS (On-Demand Historical Fetching)
         // ============================================================
         
-        // Helper to grab historical data ONLY when requested by user
         async function fetchTokensForDateRange(startDate, endDate) {
             const currentMonthStart = getCurrentMonthStartStr();
             
-            // If the requested range is entirely within the current month, we already have it in memory! Lightning fast.
+            // If entirely within the current month, grab from fast memory
             if (startDate >= currentMonthStart) {
                 return loadedTokens.filter(t => {
                     const dateStr = t.issuedDate || t.date;
@@ -451,7 +479,7 @@
                 });
             }
             
-            // Otherwise, we need to securely fetch the historical data from Firebase
+            // Otherwise securely fetch history
             const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', startDate));
             const snap = await getDocs(q);
             
@@ -485,14 +513,12 @@
             const originalBtnText = btn.innerHTML;
             const currentMonthStart = getCurrentMonthStartStr();
             
-            // Show loading state if we are about to fetch history
             if (startDate < currentMonthStart) {
                 btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Fetching History...';
                 btn.disabled = true;
             }
 
             try {
-                // Wait for the dynamic routing fetch
                 const targetTokens = await fetchTokensForDateRange(startDate, endDate);
                 
                 const modal = document.getElementById('report-preview-modal');
@@ -503,7 +529,6 @@
                 let count = 0;
                 let totalCost = 0;
 
-                // Sort Chronological
                 targetTokens.sort((a, b) => {
                     const tA = a.issuedAt?.seconds || 0;
                     const tB = b.issuedAt?.seconds || 0;
@@ -520,7 +545,6 @@
                     const comp = log.companyName || log.company || '';
                     const site = log.site || '';
 
-                    // Grouping Filter Logic
                     if (filterType === 'DEPT' && !dept) return; 
                     if (filterType === 'ACCT' && !acct) return;
                     if (filterType === 'COMP' && !comp) return;
@@ -622,7 +646,6 @@
             btn.disabled = true;
 
             try {
-                // Fetch dynamically routed tokens
                 const targetTokens = await fetchTokensForDateRange(startDate, endDate);
                 
                 let csvHeaders = "Date,Time,Emp Name,Emp ID,Department,Site,Account,Company,Status,Meal Name,Cost Applied,Issued By,Redeemed By\r\n";
@@ -634,7 +657,6 @@
                     
                     if (filterType === 'CONSUMED_ONLY' && !isConsumed) return;
                     
-                    // Specific group filtering
                     if (filterType === 'DEPT' && !log.dept && !log.department) return;
                     if (filterType === 'ACCT' && !log.accountName && !log.account) return;
                     if (filterType === 'COMP' && !log.companyName && !log.company) return;
@@ -726,7 +748,7 @@
 
     <main class="flex-grow flex flex-col relative">
         
-        <!-- LOADING VIEW -->
+        <!-- LOADING VIEW (True Percentage Tracker) -->
         <div id="view-loading" class="fixed inset-0 z-[60] bg-[#0B1120] flex flex-col items-center justify-center transition-opacity duration-500">
             <div class="relative flex items-center justify-center mb-6">
                 <div class="absolute inline-flex h-32 w-32 rounded-full bg-[#a855f7] opacity-30 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite]"></div>
@@ -734,6 +756,14 @@
                 <div class="relative inline-flex rounded-full h-10 w-10 bg-[#a855f7] shadow-[0_0_30px_10px_rgba(168,85,247,0.8)]"></div>
             </div>
             <h2 class="text-white font-extrabold text-2xl tracking-tight z-10 relative mt-2">Loading Intelligence...</h2>
+            
+            <div class="w-48 sm:w-64 mt-6 bg-slate-800 rounded-full h-1.5 overflow-hidden shadow-inner border border-slate-700/50">
+                <div id="main-loading-bar" class="h-full bg-gradient-to-r from-[#a855f7] to-[#d8b4fe] w-0 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(168,85,247,0.8)]"></div>
+            </div>
+            <div class="mt-3 text-[10px] font-bold uppercase tracking-widest text-[#a855f7] flex items-center gap-2">
+                <span id="main-loading-text">Initializing Request</span>
+                <span class="bg-[#a855f7]/20 px-2 py-0.5 rounded font-mono"><span id="main-loading-percent">0</span>%</span>
+            </div>
         </div>
 
         <!-- UNAUTHORIZED VIEW -->
