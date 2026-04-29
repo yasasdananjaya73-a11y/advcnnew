@@ -64,7 +64,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, onSnapshot, doc, getDocs, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, doc, getDoc, getDocs, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase Config
         let firebaseConfig = {};
@@ -88,7 +88,11 @@
         const appId = (typeof __app_id !== 'undefined') ? __app_id : 'canteen-os-live';
 
         // State
-        let loadedTokens = []; // Holds ONLY current month's tokens for ultra-fast performance
+        let loadedTokens = []; 
+        let dailyRates = {
+            "Sunday": 0, "Monday": 0, "Tuesday": 0, "Wednesday": 0,
+            "Thursday": 0, "Friday": 0, "Saturday": 0
+        };
         
         const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
         const STATS_CACHE_KEY = `ent_report_stats_${appId}`;
@@ -103,8 +107,23 @@
 
         const formatter = new Intl.NumberFormat('en-LK', { style: 'currency', currency: 'LKR' });
         
-        function getTodayStr() { return new Date().toISOString().split('T')[0]; }
+        function getTodayStr() { 
+            // Fix timezone offsets safely
+            const d = new Date();
+            const offsetDate = new Date(d.getTime() - (d.getTimezoneOffset() * 60000));
+            return offsetDate.toISOString().split('T')[0];
+        }
         function getCurrentMonthStartStr() { return getTodayStr().substring(0, 7) + '-01'; }
+        function getDayName(dateString) {
+            if (!dateString) return '';
+            const parts = dateString.split('-');
+            if (parts.length === 3) {
+                const date = new Date(parts[0], parts[1] - 1, parts[2]);
+                const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                return days[date.getDay()];
+            }
+            return '';
+        }
 
         window.showToast = (message, type = 'success') => {
             const container = document.getElementById('toast-container');
@@ -120,42 +139,77 @@
             }, 3000);
         };
 
-        // --- Visual Live Sync Progress Animation ---
-        window.syncAnimating = false;
-        function triggerSyncAnimation() {
-            const el = document.getElementById('sync-percent');
-            const bar = document.getElementById('sync-progress-bar');
-            const indicator = document.getElementById('sync-indicator');
+        // --- True Loading Percentage System ---
+        let currentLoadPercent = 0;
+        window.setRealLoadingProgress = (percent, textStatus) => {
+            if (currentLoadPercent >= 100) return; 
+            currentLoadPercent = percent;
             
-            if (!el || !bar || !indicator) return;
-            if (!indicator.classList.contains('hidden') && window.syncAnimating) return;
+            const bar = document.getElementById('main-loading-bar');
+            const pct = document.getElementById('main-loading-percent');
+            const txt = document.getElementById('main-loading-text');
+            
+            if (bar) bar.style.width = percent + '%';
+            if (pct) pct.textContent = percent;
+            if (txt && textStatus) txt.textContent = textStatus;
+            
+            if (percent >= 100) {
+                setTimeout(() => {
+                    const loader = document.getElementById('view-loading');
+                    if (loader) {
+                        loader.classList.add('opacity-0');
+                        setTimeout(() => {
+                            loader.classList.add('hidden');
+                            document.getElementById('view-report').classList.remove('hidden');
+                            initialRenderDone = true;
+                        }, 500);
+                    }
+                }, 600); 
+            }
+        };
+
+        // --- Live Sync Animation ---
+        let syncTimeout;
+        function triggerSyncAnimation() {
+            const indicator = document.getElementById('sync-indicator');
+            const bar = document.getElementById('sync-progress-bar');
+            const el = document.getElementById('sync-percent');
+            
+            if (!indicator || !bar || !el) return;
+            if (!indicator.classList.contains('hidden')) return;
             
             indicator.classList.remove('hidden');
             indicator.classList.add('flex');
-            window.syncAnimating = true;
+            
+            bar.style.transition = 'none';
+            bar.style.width = '0%';
+            el.textContent = '0%';
+            
+            void bar.offsetWidth;
+            
+            bar.style.transition = 'width 0.8s ease-out';
+            bar.style.width = '100%';
             
             let p = 0;
-            el.textContent = '0%';
-            bar.style.width = '0%';
-            
-            clearInterval(window.syncInterval);
-            window.syncInterval = setInterval(() => {
-                p += Math.floor(Math.random() * 30) + 15; 
-                if (p >= 100) {
+            const fastInterval = setInterval(() => {
+                p += 20;
+                if(p >= 100) {
                     p = 100;
-                    clearInterval(window.syncInterval);
-                    setTimeout(() => {
-                        indicator.classList.add('hidden');
-                        indicator.classList.remove('flex');
-                        window.syncAnimating = false;
-                    }, 800); 
+                    clearInterval(fastInterval);
                 }
                 el.textContent = p + '%';
-                bar.style.width = p + '%';
-            }, 30);
+            }, 100);
+
+            clearTimeout(syncTimeout);
+            syncTimeout = setTimeout(() => {
+                indicator.classList.add('hidden');
+                indicator.classList.remove('flex');
+                clearInterval(fastInterval);
+            }, 1500); 
         }
 
         const initAuth = async () => {
+            window.setRealLoadingProgress(10, 'Initializing Security Node');
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
@@ -169,18 +223,6 @@
             window.location.href = 'index.html';
         };
 
-        function checkDataLoaded() {
-            if (isSysUsersLoaded && isTokensLoaded) {
-                renderReportDashboard();
-                
-                if (!initialRenderDone) {
-                    document.getElementById('view-loading').classList.add('hidden');
-                    document.getElementById('view-report').classList.remove('hidden');
-                    initialRenderDone = true;
-                }
-            }
-        }
-
         // Fast Boot from Memory Cache
         const checkInstantBoot = () => {
             const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
@@ -189,13 +231,15 @@
                 
                 const cachedStatsStr = localStorage.getItem(STATS_CACHE_KEY);
                 if (cachedStatsStr) {
-                    const s = JSON.parse(cachedStatsStr);
-                    document.getElementById('rpt-total-spend').textContent = formatCurrency(s.tValue || 0);
-                    document.getElementById('rpt-tokens-issued-today').textContent = s.tIssued || 0;
-                    document.getElementById('rpt-tokens-consumed-today').textContent = s.tRedeemed || 0;
-                    document.getElementById('rpt-month-spend').textContent = formatCurrency(s.mValue || 0);
-                    document.getElementById('rpt-month-issued').textContent = s.mIssued || 0;
-                    document.getElementById('rpt-month-consumed').textContent = s.mRedeemed || 0;
+                    try {
+                        const s = JSON.parse(cachedStatsStr);
+                        document.getElementById('rpt-total-spend').textContent = formatCurrency(s.tValue || 0);
+                        document.getElementById('rpt-tokens-issued-today').textContent = s.tIssued || 0;
+                        document.getElementById('rpt-tokens-consumed-today').textContent = s.tRedeemed || 0;
+                        document.getElementById('rpt-month-spend').textContent = formatCurrency(s.mValue || 0);
+                        document.getElementById('rpt-month-issued').textContent = s.mIssued || 0;
+                        document.getElementById('rpt-month-consumed').textContent = s.mRedeemed || 0;
+                    } catch(e) {}
                 }
                 
                 document.getElementById('view-loading').classList.add('hidden');
@@ -204,6 +248,7 @@
                 document.getElementById('rpt-start').value = getTodayStr();
                 document.getElementById('rpt-end').value = getTodayStr();
                 
+                initialRenderDone = true;
                 return true;
             }
             return false;
@@ -213,6 +258,8 @@
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
+                window.setRealLoadingProgress(30, 'Verifying Credentials');
+                
                 if (!didInstantBoot) {
                     const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
                     if (sessionStr) {
@@ -243,25 +290,44 @@
                     if (!docSnap.exists() || docSnap.data().status !== 'ACTIVE') {
                         window.location.href = 'index.html';
                     }
-                    isSysUsersLoaded = true; checkDataLoaded();
+                    if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
                 }, (err) => console.error("System User fetch error:", err));
             } else {
-                isSysUsersLoaded = true; checkDataLoaded();
+                if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
             }
 
-            // 2. SPEED OPTIMIZATION: Load ONLY current month's tokens for the live dashboard
+            // 2. Fetch Meal Prices
+            const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'meal_prices');
+            onSnapshot(settingsRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    if (data.prices) dailyRates = data.prices;
+                    else if (data.dailyRates) dailyRates = data.dailyRates;
+                }
+                if (!initialRenderDone) window.setRealLoadingProgress(60, 'Loading Financials');
+                else renderReportDashboard();
+            }, (err) => console.error("Prices fetch error:", err));
+
+            // 3. Fetch Monthly Tokens
             const currentMonthStart = getCurrentMonthStartStr();
-            const qTokens = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', currentMonthStart));
+            const tokensRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
             
-            onSnapshot(qTokens, (snap) => {
+            onSnapshot(tokensRef, (snap) => {
                 loadedTokens = [];
-                snap.forEach(doc => { loadedTokens.push({ id: doc.id, ...doc.data() }); });
+                snap.forEach(doc => { 
+                    const data = doc.data();
+                    const dateStr = data.issuedDate || data.date;
+                    if (dateStr && dateStr >= currentMonthStart) {
+                        loadedTokens.push({ id: doc.id, ...data }); 
+                    }
+                });
                 
-                isTokensLoaded = true;
-                checkDataLoaded();
+                // CRITICAL FIX: Always process data immediately before firing the UI completion
+                renderReportDashboard();
                 
-                if (initialRenderDone) {
-                    renderReportDashboard();
+                if (!initialRenderDone) {
+                    window.setRealLoadingProgress(100, 'Intelligence Loaded');
+                } else {
                     triggerSyncAnimation();
                 }
             }, (err) => {
@@ -270,10 +336,10 @@
             });
         };
 
-        function formatCurrency(amount) { return formatter.format(amount); }
+        function formatCurrency(amount) { return formatter.format(amount || 0); }
 
         // ============================================================
-        //  ANALYTICS ENGINE (Live UI Render)
+        //  ANALYTICS ENGINE (Live UI Render) - Fully Bulletproofed
         // ============================================================
         function renderReportDashboard() {
             const todayStr = getTodayStr();
@@ -288,10 +354,12 @@
             const compStats = {};
             const siteStats = {};
 
-            // Initialize last 7 days
+            // Initialize last 7 days safely
             for (let i=6; i>=0; i--) {
-                const d = new Date(); d.setDate(d.getDate() - i);
-                dailyStats[d.toISOString().split('T')[0]] = 0;
+                const d = new Date();
+                d.setDate(d.getDate() - i);
+                const offsetDate = new Date(d.getTime() - (d.getTimezoneOffset() * 60000));
+                dailyStats[offsetDate.toISOString().split('T')[0]] = 0;
             }
 
             const tbody = document.getElementById('report-table-body');
@@ -299,7 +367,6 @@
 
             let tableCount = 0;
             
-            // Sort by latest
             const sortedTokens = [...loadedTokens].sort((a,b) => {
                 const timeA = a.issuedAt?.seconds || 0;
                 const timeB = b.issuedAt?.seconds || 0;
@@ -307,60 +374,83 @@
             });
 
             sortedTokens.forEach(data => {
-                const cost = data.costs?.total || data.costApplied || 0;
-                const isConsumed = data.status === 'CONSUMED' || data.mealRedeemed === true;
-                const dateStr = data.issuedDate || data.date;
-                
-                if (!dateStr) return;
-
-                if (dateStr.startsWith(currentMonthStr)) {
-                    mIssued++;
-                    if (isConsumed) { mValue += cost; mRedeemed++; }
-                }
-
-                if(dateStr === todayStr) {
-                    tIssued++;
-                    if (isConsumed) { tValue += cost; tRedeemed++; }
+                try {
+                    const isConsumed = data.status === 'CONSUMED' || data.status === 'REDEEMED' || data.mealRedeemed === true;
+                    const dateStr = data.issuedDate || data.date;
                     
-                    // Live Feed (Today only)
-                    if(tbody && tableCount < 100) {
-                        const tr = document.createElement('tr');
-                        tr.className = 'hover:bg-slate-800/30 border-b border-slate-700/50 last:border-0 transition-colors animate-fade-in';
-                        
-                        const timeStr = data.issuedAt ? new Date(data.issuedAt.seconds*1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '-';
-                        const statusBadge = isConsumed 
-                            ? `<span class="px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wide font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/20">REDEEMED</span>`
-                            : `<span class="px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wide font-bold bg-amber-500/20 text-amber-400 border border-amber-500/20">CLEARED</span>`;
+                    if (!dateStr) return;
 
-                        tr.innerHTML = `
-                            <td class="px-6 py-4 text-sm font-bold text-white flex flex-col">
-                                <span>${data.empName || 'Unknown'}</span>
-                                <span class="text-[10px] font-mono text-slate-400 mt-1">${data.empId}</span>
-                            </td>
-                            <td class="px-6 py-4 text-xs font-bold text-slate-400">${timeStr}</td>
-                            <td class="px-6 py-4 text-sm text-slate-400">${data.dept || data.department || '-'}</td>
-                            <td class="px-6 py-4 text-sm text-slate-400">${data.site || '-'}</td>
-                            <td class="px-6 py-4 text-sm">${statusBadge}</td>
-                            <td class="px-6 py-4 text-sm font-bold text-[#a855f7] text-right">${isConsumed ? formatCurrency(cost) : '-'}</td>
-                        `;
-                        tbody.appendChild(tr);
-                        tableCount++;
+                    // Safe Cost Calculation
+                    let cost = 0;
+                    if (data.costs && typeof data.costs.total === 'number') {
+                        cost = data.costs.total;
+                    } else if (data.costApplied) {
+                        cost = data.costApplied;
+                    } else {
+                        cost = parseFloat(dailyRates[getDayName(dateStr)]) || 0;
                     }
-                }
 
-                // Distributions (Only count consumed meals)
-                if (isConsumed) {
-                    if (dailyStats.hasOwnProperty(dateStr)) dailyStats[dateStr] += cost;
+                    if (dateStr.startsWith(currentMonthStr)) {
+                        mIssued++;
+                        if (isConsumed) { mValue += cost; mRedeemed++; }
+                    }
 
-                    const dept = data.dept || data.department || 'Unknown';
-                    const acct = data.accountName || data.account || 'Unknown';
-                    const comp = data.companyName || data.company || 'Unknown';
-                    const site = data.site || 'Unknown';
+                    if(dateStr === todayStr) {
+                        tIssued++;
+                        if (isConsumed) { tValue += cost; tRedeemed++; }
+                        
+                        if(tbody && tableCount < 100) {
+                            const tr = document.createElement('tr');
+                            tr.className = 'hover:bg-slate-800/30 border-b border-slate-700/50 last:border-0 transition-colors animate-fade-in';
+                            
+                            // Highly Resilient Time Parsing to prevent JS crashes on malformed data
+                            let timeStr = '-';
+                            if (data.issuedAt) {
+                                if (typeof data.issuedAt.toDate === 'function') {
+                                    timeStr = data.issuedAt.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                } else if (data.issuedAt.seconds) {
+                                    timeStr = new Date(data.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                } else if (typeof data.issuedAt === 'string') {
+                                    timeStr = new Date(data.issuedAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                }
+                            }
 
-                    deptStats[dept] = (deptStats[dept] || 0) + cost;
-                    acctStats[acct] = (acctStats[acct] || 0) + cost;
-                    compStats[comp] = (compStats[comp] || 0) + cost;
-                    siteStats[site] = (siteStats[site] || 0) + cost;
+                            const statusBadge = isConsumed 
+                                ? `<span class="px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wide font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/20">REDEEMED</span>`
+                                : `<span class="px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wide font-bold bg-amber-500/20 text-amber-400 border border-amber-500/20">CLEARED</span>`;
+
+                            tr.innerHTML = `
+                                <td class="px-6 py-4 text-sm font-bold text-white flex flex-col">
+                                    <span>${data.empName || 'Unknown'}</span>
+                                    <span class="text-[10px] font-mono text-slate-400 mt-1">${data.empId || '-'}</span>
+                                </td>
+                                <td class="px-6 py-4 text-xs font-bold text-slate-400">${timeStr}</td>
+                                <td class="px-6 py-4 text-sm text-slate-400">${data.dept || data.department || '-'}</td>
+                                <td class="px-6 py-4 text-sm text-slate-400">${data.site || '-'}</td>
+                                <td class="px-6 py-4 text-sm">${statusBadge}</td>
+                                <td class="px-6 py-4 text-sm font-bold text-[#a855f7] text-right">${isConsumed ? formatCurrency(cost) : '-'}</td>
+                            `;
+                            tbody.appendChild(tr);
+                            tableCount++;
+                        }
+                    }
+
+                    // Distribution Arrays logic
+                    if (isConsumed) {
+                        if (dailyStats.hasOwnProperty(dateStr)) dailyStats[dateStr] += cost;
+
+                        const dept = data.dept || data.department || 'Unknown';
+                        const acct = data.accountName || data.account || 'Unknown';
+                        const comp = data.companyName || data.company || 'Unknown';
+                        const site = data.site || 'Unknown';
+
+                        deptStats[dept] = (deptStats[dept] || 0) + cost;
+                        acctStats[acct] = (acctStats[acct] || 0) + cost;
+                        compStats[comp] = (compStats[comp] || 0) + cost;
+                        siteStats[site] = (siteStats[site] || 0) + cost;
+                    }
+                } catch(err) {
+                    console.warn("Skipped malformed data record", err);
                 }
             });
 
@@ -382,21 +472,27 @@
             renderDistributionChart('rpt-chart-site', siteStats, true);
 
             const trendContainer = document.getElementById('rpt-chart-trend');
-            trendContainer.innerHTML = '';
-            const maxDaily = Math.max(...Object.values(dailyStats), 10);
-            Object.keys(dailyStats).forEach(date => {
-                const val = dailyStats[date];
-                const hPercent = (val / maxDaily) * 100;
-                trendContainer.innerHTML += `
-                    <div class="flex flex-col items-center flex-1">
-                        <div class="w-full bg-slate-800/50 rounded-t-lg relative group h-32 flex items-end justify-center border border-slate-700/30 border-b-0">
-                            <div class="w-3/4 bg-gradient-to-t from-[#7e22ce] to-[#a855f7] rounded-t-md transition-all duration-700 shadow-[0_0_10px_rgba(168,85,247,0.3)] hover:brightness-125" style="height: ${Math.max(hPercent, 2)}%"></div>
-                            <div class="absolute -top-10 bg-slate-800 text-white text-xs px-2.5 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 shadow-xl pointer-events-none border border-slate-700">${formatCurrency(val)}</div>
-                        </div>
-                        <div class="text-[10px] text-slate-500 mt-2 font-bold uppercase tracking-wider">${new Date(date).toLocaleDateString('en-US', {weekday: 'short'})}</div>
-                    </div>
-                `;
-            });
+            if (trendContainer) {
+                trendContainer.innerHTML = '';
+                const maxDaily = Math.max(...Object.values(dailyStats), 10);
+                Object.keys(dailyStats).forEach(date => {
+                    const val = dailyStats[date];
+                    const hPercent = (val / maxDaily) * 100;
+                    
+                    // Only render valid days
+                    if (val >= 0) {
+                        trendContainer.innerHTML += `
+                            <div class="flex flex-col items-center flex-1">
+                                <div class="w-full bg-slate-800/50 rounded-t-lg relative group h-32 flex items-end justify-center border border-slate-700/30 border-b-0">
+                                    <div class="w-3/4 bg-gradient-to-t from-[#7e22ce] to-[#a855f7] rounded-t-md transition-all duration-700 shadow-[0_0_10px_rgba(168,85,247,0.3)] hover:brightness-125" style="height: ${Math.max(hPercent, 2)}%"></div>
+                                    <div class="absolute -top-10 bg-slate-800 text-white text-xs px-2.5 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 shadow-xl pointer-events-none border border-slate-700">${formatCurrency(val)}</div>
+                                </div>
+                                <div class="text-[10px] text-slate-500 mt-2 font-bold uppercase tracking-wider">${new Date(date).toLocaleDateString('en-US', {weekday: 'short'})}</div>
+                            </div>
+                        `;
+                    }
+                });
+            }
             
             if (tableCount === 0 && tbody) {
                 tbody.innerHTML = `<tr><td colspan="6" class="px-6 py-8 text-center text-slate-500 font-medium"><i class="fas fa-info-circle mr-2"></i>No ledger entries for today yet.</td></tr>`;
@@ -409,10 +505,10 @@
             container.innerHTML = '';
             
             const total = Object.values(stats).reduce((a,b)=>a+b, 0) || 1;
-            const sortedKeys = Object.keys(stats).sort((a,b) => stats[b] - stats[a]).slice(0, 5); // Top 5
+            const sortedKeys = Object.keys(stats).sort((a,b) => stats[b] - stats[a]).slice(0, 5); 
 
             if (sortedKeys.length === 0) {
-                container.innerHTML = '<div class="text-xs text-slate-500 italic py-4">No financial data available for current month.</div>';
+                container.innerHTML = '<div class="text-xs text-slate-500 italic py-4">No financial data available.</div>';
                 return;
             }
 
@@ -439,11 +535,9 @@
         //  REPORTS & EXPORTS (On-Demand Historical Fetching)
         // ============================================================
         
-        // Helper to grab historical data ONLY when requested by user
         async function fetchTokensForDateRange(startDate, endDate) {
             const currentMonthStart = getCurrentMonthStartStr();
             
-            // If the requested range is entirely within the current month, we already have it in memory! Lightning fast.
             if (startDate >= currentMonthStart) {
                 return loadedTokens.filter(t => {
                     const dateStr = t.issuedDate || t.date;
@@ -451,15 +545,12 @@
                 });
             }
             
-            // Otherwise, we need to securely fetch the historical data from Firebase
-            const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', startDate));
-            const snap = await getDocs(q);
-            
+            const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'));
             let results = [];
             snap.forEach(doc => {
                 const data = doc.data();
                 const dateStr = data.issuedDate || data.date;
-                if (dateStr <= endDate) {
+                if (dateStr >= startDate && dateStr <= endDate) {
                     results.push(data);
                 }
             });
@@ -485,14 +576,12 @@
             const originalBtnText = btn.innerHTML;
             const currentMonthStart = getCurrentMonthStartStr();
             
-            // Show loading state if we are about to fetch history
             if (startDate < currentMonthStart) {
                 btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Fetching History...';
                 btn.disabled = true;
             }
 
             try {
-                // Wait for the dynamic routing fetch
                 const targetTokens = await fetchTokensForDateRange(startDate, endDate);
                 
                 const modal = document.getElementById('report-preview-modal');
@@ -503,7 +592,6 @@
                 let count = 0;
                 let totalCost = 0;
 
-                // Sort Chronological
                 targetTokens.sort((a, b) => {
                     const tA = a.issuedAt?.seconds || 0;
                     const tB = b.issuedAt?.seconds || 0;
@@ -512,15 +600,22 @@
 
                 targetTokens.forEach(log => {
                     const isConsumed = log.status === 'CONSUMED' || log.status === 'REDEEMED' || log.mealRedeemed === true;
-                    const cost = log.costs?.total || log.costApplied || 0;
-                    const dateStr = log.issuedDate || log.date;
                     
+                    let cost = 0;
+                    if (log.costs && typeof log.costs.total === 'number') {
+                        cost = log.costs.total;
+                    } else if (log.costApplied) {
+                        cost = log.costApplied;
+                    } else {
+                        cost = parseFloat(dailyRates[getDayName(log.issuedDate || log.date)]) || 0;
+                    }
+
+                    const dateStr = log.issuedDate || log.date;
                     const dept = log.dept || log.department || '';
                     const acct = log.accountName || log.account || 'CTE';
                     const comp = log.companyName || log.company || '';
                     const site = log.site || '';
 
-                    // Grouping Filter Logic
                     if (filterType === 'DEPT' && !dept) return; 
                     if (filterType === 'ACCT' && !acct) return;
                     if (filterType === 'COMP' && !comp) return;
@@ -533,14 +628,21 @@
                     else if(filterType === 'COMP') groupVal = comp;
                     else if(filterType === 'SITE') groupVal = site;
 
-                    const timeStr = log.issuedAt ? new Date(log.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+                    // Resilient timestamp rendering
+                    let timeStr = '-';
+                    if (log.issuedAt) {
+                        if (typeof log.issuedAt.toDate === 'function') timeStr = log.issuedAt.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        else if (log.issuedAt.seconds) timeStr = new Date(log.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        else if (typeof log.issuedAt === 'string') timeStr = new Date(log.issuedAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    }
+
                     const statusStr = isConsumed ? 'REDEEMED' : 'CLEARED';
 
                     rows += `
                         <tr>
                             <td>${dateStr} ${timeStr}</td>
                             <td>${log.empName || 'Unknown'}</td>
-                            <td>${log.empId}</td>
+                            <td>${log.empId || '-'}</td>
                             <td>${dept}</td>
                             <td>${site || '-'}</td>
                             <td>${statusStr}</td>
@@ -622,7 +724,6 @@
             btn.disabled = true;
 
             try {
-                // Fetch dynamically routed tokens
                 const targetTokens = await fetchTokensForDateRange(startDate, endDate);
                 
                 let csvHeaders = "Date,Time,Emp Name,Emp ID,Department,Site,Account,Company,Status,Meal Name,Cost Applied,Issued By,Redeemed By\r\n";
@@ -634,22 +735,32 @@
                     
                     if (filterType === 'CONSUMED_ONLY' && !isConsumed) return;
                     
-                    // Specific group filtering
                     if (filterType === 'DEPT' && !log.dept && !log.department) return;
                     if (filterType === 'ACCT' && !log.accountName && !log.account) return;
                     if (filterType === 'COMP' && !log.companyName && !log.company) return;
                     if (filterType === 'SITE' && !log.site) return;
 
                     const dateStr = log.issuedDate || log.date;
-                    const timeStr = log.issuedAt ? new Date(log.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+                    
+                    let timeStr = '';
+                    if (log.issuedAt) {
+                        if (typeof log.issuedAt.toDate === 'function') timeStr = log.issuedAt.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        else if (log.issuedAt.seconds) timeStr = new Date(log.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        else if (typeof log.issuedAt === 'string') timeStr = new Date(log.issuedAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    }
+
                     const statusStr = isConsumed ? 'REDEEMED' : 'CLEARED';
-                    const cost = log.costs?.total || log.costApplied || 0;
+                    
+                    let cost = 0;
+                    if (log.costs && typeof log.costs.total === 'number') cost = log.costs.total;
+                    else if (log.costApplied) cost = log.costApplied;
+                    else cost = parseFloat(dailyRates[getDayName(dateStr)]) || 0;
 
                     const row = [
                         `"${dateStr}"`, 
                         `"${timeStr}"`, 
                         `"${log.empName || ''}"`, 
-                        `"${log.empId}"`,
+                        `"${log.empId || ''}"`,
                         `"${log.dept || log.department || ''}"`, 
                         `"${log.site || ''}"`, 
                         `"${log.accountName || log.account || 'CTE'}"`, 
@@ -726,7 +837,7 @@
 
     <main class="flex-grow flex flex-col relative">
         
-        <!-- LOADING VIEW -->
+        <!-- LOADING VIEW (True Percentage Tracker) -->
         <div id="view-loading" class="fixed inset-0 z-[60] bg-[#0B1120] flex flex-col items-center justify-center transition-opacity duration-500">
             <div class="relative flex items-center justify-center mb-6">
                 <div class="absolute inline-flex h-32 w-32 rounded-full bg-[#a855f7] opacity-30 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite]"></div>
@@ -734,6 +845,14 @@
                 <div class="relative inline-flex rounded-full h-10 w-10 bg-[#a855f7] shadow-[0_0_30px_10px_rgba(168,85,247,0.8)]"></div>
             </div>
             <h2 class="text-white font-extrabold text-2xl tracking-tight z-10 relative mt-2">Loading Intelligence...</h2>
+            
+            <div class="w-48 sm:w-64 mt-6 bg-slate-800 rounded-full h-1.5 overflow-hidden shadow-inner border border-slate-700/50">
+                <div id="main-loading-bar" class="h-full bg-gradient-to-r from-[#a855f7] to-[#d8b4fe] w-0 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(168,85,247,0.8)]"></div>
+            </div>
+            <div class="mt-3 text-[10px] font-bold uppercase tracking-widest text-[#a855f7] flex items-center gap-2">
+                <span id="main-loading-text">Initializing Request</span>
+                <span class="bg-[#a855f7]/20 px-2 py-0.5 rounded font-mono"><span id="main-loading-percent">0</span>%</span>
+            </div>
         </div>
 
         <!-- UNAUTHORIZED VIEW -->
