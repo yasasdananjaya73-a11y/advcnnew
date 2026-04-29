@@ -167,6 +167,14 @@
                 if (viewName === 'login') views[viewName].classList.add('flex');
             }
         }
+        
+        function forceShowLogin() {
+            document.getElementById('view-loading').classList.add('hidden');
+            document.getElementById('view-menu').classList.add('hidden');
+            document.getElementById('main-nav').classList.add('hidden');
+            document.getElementById('view-login').classList.remove('hidden');
+            document.getElementById('view-login').classList.add('flex');
+        }
 
         function proceedToMenu() {
             showView('menu');
@@ -275,35 +283,37 @@
         };
 
         // ============================================================
-        // 0-SECOND INSTANT BOOT CACHE ENGINE (Bypasses Loading Screen)
+        // 0-SECOND INSTANT BOOT CACHE ENGINE (Persistent Login Fix)
         // ============================================================
         const checkInstantBoot = () => {
             const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
             if (sessionStr) {
-                const session = JSON.parse(sessionStr);
-                // Valid Session? Skip loader and show dashboard instantly.
-                if (session.date === getTodayStr() && session.role) {
-                    loggedInSysUser = session;
-                    
-                    const cachedStatsStr = localStorage.getItem(STATS_CACHE_KEY);
-                    if (cachedStatsStr) {
-                        try {
-                            const s = JSON.parse(cachedStatsStr);
-                            document.getElementById('stat-today-issued').textContent = s.tIssued || 0;
-                            document.getElementById('stat-today-redeemed').textContent = s.tRedeemed || 0;
-                            document.getElementById('stat-today-val').textContent = formatRs(s.tValue || 0);
-                            document.getElementById('stat-month-issued').textContent = s.mIssued || 0;
-                            document.getElementById('stat-month-redeemed').textContent = s.mRedeemed || 0;
-                            document.getElementById('stat-month-val').textContent = formatRs(s.mValue || 0);
-                        } catch(e) {}
+                try {
+                    const session = JSON.parse(sessionStr);
+                    // Valid Session if username and role exist. (Removed strict daily date-check)
+                    if (session.username && session.role) {
+                        loggedInSysUser = session;
+                        
+                        const cachedStatsStr = localStorage.getItem(STATS_CACHE_KEY);
+                        if (cachedStatsStr) {
+                            try {
+                                const s = JSON.parse(cachedStatsStr);
+                                document.getElementById('stat-today-issued').textContent = s.tIssued || 0;
+                                document.getElementById('stat-today-redeemed').textContent = s.tRedeemed || 0;
+                                document.getElementById('stat-today-val').textContent = formatRs(s.tValue || 0);
+                                document.getElementById('stat-month-issued').textContent = s.mIssued || 0;
+                                document.getElementById('stat-month-redeemed').textContent = s.mRedeemed || 0;
+                                document.getElementById('stat-month-val').textContent = formatRs(s.mValue || 0);
+                            } catch(e) {}
+                        }
+                        
+                        document.getElementById('view-loading').classList.add('hidden');
+                        document.getElementById('view-login').classList.add('hidden');
+                        proceedToMenu();
+                        initialRenderDone = true; // Prevents the 5-sec loader from ever triggering again
+                        return true;
                     }
-                    
-                    document.getElementById('view-loading').classList.add('hidden');
-                    document.getElementById('view-login').classList.add('hidden');
-                    proceedToMenu();
-                    initialRenderDone = true; // Prevents the 5-sec loader from triggering later
-                    return true;
-                }
+                } catch(e) {}
             }
             return false;
         };
@@ -347,19 +357,18 @@
                     window.setRealLoadingProgress(30, 'Verifying Credentials');
                     const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
                     if (sessionStr) {
-                        const session = JSON.parse(sessionStr);
-                        if(session.date === getTodayStr()) {
-                            loggedInSysUser = session;
-                            startBootSequence();
-                        } else {
-                            document.getElementById('view-loading').classList.add('hidden');
-                            document.getElementById('view-login').classList.remove('hidden');
-                            document.getElementById('view-login').classList.add('flex');
-                        }
+                        try {
+                            const session = JSON.parse(sessionStr);
+                            // If memory exists but wasn't caught by early boot (rare fallback)
+                            if(session.username && session.role) {
+                                loggedInSysUser = session;
+                                startBootSequence();
+                            } else {
+                                forceShowLogin();
+                            }
+                        } catch (e) { forceShowLogin(); }
                     } else {
-                        document.getElementById('view-loading').classList.add('hidden');
-                        document.getElementById('view-login').classList.remove('hidden');
-                        document.getElementById('view-login').classList.add('flex');
+                        forceShowLogin();
                     }
                 } else {
                     // Dashboard is already visible (0-second load). Start quiet background sync.
@@ -367,9 +376,7 @@
                 }
             } else {
                 if (!didInstantBoot) {
-                    document.getElementById('view-loading').classList.add('hidden');
-                    document.getElementById('view-login').classList.remove('hidden');
-                    document.getElementById('view-login').classList.add('flex');
+                    forceShowLogin();
                 }
             }
         });
@@ -561,10 +568,7 @@
             localStorage.removeItem(STATS_CACHE_KEY); // Clear cache on logout
             loggedInSysUser = null;
             initialRenderDone = false; // Reset rendering state
-            document.getElementById('view-menu').classList.add('hidden');
-            navBar.classList.add('hidden');
-            document.getElementById('view-login').classList.remove('hidden');
-            document.getElementById('view-login').classList.add('flex');
+            forceShowLogin();
         };
 
         window.openModule = (path) => {
