@@ -95,11 +95,11 @@
         };
         
         const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
-        const STATS_CACHE_KEY = `ent_report_stats_${appId}`;
         let loggedInSysUser = null;
 
         // Boot states
         let isSysUsersLoaded = false;
+        let isPricesLoaded = false;
         let isTokensLoaded = false;
         let initialRenderDone = false;
 
@@ -137,35 +137,6 @@
                 toast.style.opacity = '0'; toast.style.transform = 'translateY(10px)'; toast.style.transition = 'all 0.3s ease';
                 setTimeout(() => toast.remove(), 300);
             }, 3000);
-        };
-
-        // --- True Loading Percentage System ---
-        let currentLoadPercent = 0;
-        window.setRealLoadingProgress = (percent, textStatus) => {
-            if (currentLoadPercent >= 100) return; 
-            currentLoadPercent = percent;
-            
-            const bar = document.getElementById('main-loading-bar');
-            const pct = document.getElementById('main-loading-percent');
-            const txt = document.getElementById('main-loading-text');
-            
-            if (bar) bar.style.width = percent + '%';
-            if (pct) pct.textContent = percent;
-            if (txt && textStatus) txt.textContent = textStatus;
-            
-            if (percent >= 100) {
-                setTimeout(() => {
-                    const loader = document.getElementById('view-loading');
-                    if (loader) {
-                        loader.classList.add('opacity-0');
-                        setTimeout(() => {
-                            loader.classList.add('hidden');
-                            document.getElementById('view-report').classList.remove('hidden');
-                            initialRenderDone = true;
-                        }, 500);
-                    }
-                }, 600); 
-            }
         };
 
         // --- Live Sync Animation ---
@@ -209,7 +180,6 @@
         }
 
         const initAuth = async () => {
-            window.setRealLoadingProgress(10, 'Initializing Security Node');
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
@@ -223,56 +193,50 @@
             window.location.href = 'index.html';
         };
 
-        // Fast Boot from Memory Cache
-        const checkInstantBoot = () => {
-            const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
-            if (sessionStr) {
-                loggedInSysUser = JSON.parse(sessionStr);
-                
-                const cachedStatsStr = localStorage.getItem(STATS_CACHE_KEY);
-                if (cachedStatsStr) {
-                    try {
-                        const s = JSON.parse(cachedStatsStr);
-                        document.getElementById('rpt-total-spend').textContent = formatCurrency(s.tValue || 0);
-                        document.getElementById('rpt-tokens-issued-today').textContent = s.tIssued || 0;
-                        document.getElementById('rpt-tokens-consumed-today').textContent = s.tRedeemed || 0;
-                        document.getElementById('rpt-month-spend').textContent = formatCurrency(s.mValue || 0);
-                        document.getElementById('rpt-month-issued').textContent = s.mIssued || 0;
-                        document.getElementById('rpt-month-consumed').textContent = s.mRedeemed || 0;
-                    } catch(e) {}
-                }
-                
-                document.getElementById('view-loading').classList.add('hidden');
-                document.getElementById('view-report').classList.remove('hidden');
-                
-                document.getElementById('rpt-start').value = getTodayStr();
-                document.getElementById('rpt-end').value = getTodayStr();
-                
-                initialRenderDone = true;
-                return true;
+        function proceedToMenu() {
+            const navBar = document.getElementById('main-nav');
+            const roleDisplay = document.getElementById('role-display');
+            if (navBar) navBar.classList.remove('hidden');
+            
+            if (roleDisplay && loggedInSysUser) {
+                roleDisplay.textContent = `${loggedInSysUser.name} | ${loggedInSysUser.role}`;
             }
-            return false;
-        };
+        }
 
-        const didInstantBoot = checkInstantBoot();
+        // Strict Wait-For-Data Boot Sequence
+        function checkDataLoaded() {
+            if (isSysUsersLoaded && isPricesLoaded && isTokensLoaded) {
+                renderReportDashboard();
+                
+                if (!initialRenderDone) {
+                    const loader = document.getElementById('view-loading');
+                    if (loader) {
+                        loader.classList.add('opacity-0');
+                        setTimeout(() => {
+                            loader.classList.add('hidden');
+                            document.getElementById('view-report').classList.remove('hidden');
+                            proceedToMenu();
+                            initialRenderDone = true;
+                        }, 500);
+                    }
+                } else {
+                    triggerSyncAnimation();
+                }
+            }
+        }
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
-                window.setRealLoadingProgress(30, 'Verifying Credentials');
-                
-                if (!didInstantBoot) {
-                    const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
-                    if (sessionStr) {
-                        loggedInSysUser = JSON.parse(sessionStr);
-                        document.getElementById('rpt-start').value = getTodayStr();
-                        document.getElementById('rpt-end').value = getTodayStr();
-                    } else {
-                        document.getElementById('view-loading').classList.add('hidden');
-                        document.getElementById('view-unauthorized').classList.remove('hidden');
-                        return;
-                    }
+                const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                if (sessionStr) {
+                    loggedInSysUser = JSON.parse(sessionStr);
+                    document.getElementById('rpt-start').value = getTodayStr();
+                    document.getElementById('rpt-end').value = getTodayStr();
+                    loadData();
+                } else {
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-unauthorized').classList.remove('hidden');
                 }
-                loadData();
             }
         });
 
@@ -280,20 +244,20 @@
 
         const loadData = () => {
             if (!auth.currentUser) return;
-            
-            if (didInstantBoot) triggerSyncAnimation();
 
-            // 1. Single Point User Check
+            // 1. Point User Check
             if (loggedInSysUser && loggedInSysUser.username !== 'ADMIN') {
                 const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'system_users', loggedInSysUser.username);
                 onSnapshot(userRef, (docSnap) => {
                     if (!docSnap.exists() || docSnap.data().status !== 'ACTIVE') {
                         window.location.href = 'index.html';
                     }
-                    if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
+                    isSysUsersLoaded = true;
+                    checkDataLoaded();
                 }, (err) => console.error("System User fetch error:", err));
             } else {
-                if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
+                isSysUsersLoaded = true;
+                checkDataLoaded();
             }
 
             // 2. Fetch Meal Prices
@@ -304,11 +268,11 @@
                     if (data.prices) dailyRates = data.prices;
                     else if (data.dailyRates) dailyRates = data.dailyRates;
                 }
-                if (!initialRenderDone) window.setRealLoadingProgress(60, 'Loading Financials');
-                else renderReportDashboard();
+                isPricesLoaded = true;
+                checkDataLoaded();
             }, (err) => console.error("Prices fetch error:", err));
 
-            // 3. Fetch Monthly Tokens
+            // 3. Ultra-Fast Memory Filter: Fetch all tokens but drop dead data instantly
             const currentMonthStart = getCurrentMonthStartStr();
             const tokensRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
             
@@ -317,19 +281,14 @@
                 snap.forEach(doc => { 
                     const data = doc.data();
                     const dateStr = data.issuedDate || data.date;
+                    // Strict client-side filter drops dead data instantly
                     if (dateStr && dateStr >= currentMonthStart) {
                         loadedTokens.push({ id: doc.id, ...data }); 
                     }
                 });
                 
-                // CRITICAL FIX: Always process data immediately before firing the UI completion
-                renderReportDashboard();
-                
-                if (!initialRenderDone) {
-                    window.setRealLoadingProgress(100, 'Intelligence Loaded');
-                } else {
-                    triggerSyncAnimation();
-                }
+                isTokensLoaded = true;
+                checkDataLoaded();
             }, (err) => {
                 console.error("Tokens fetch error:", err);
                 showToast("Failed to sync metrics.", "error");
@@ -453,10 +412,6 @@
                     console.warn("Skipped malformed data record", err);
                 }
             });
-
-            // Cache Commit
-            const statsObj = { tIssued, tRedeemed, tValue, mIssued, mRedeemed, mValue };
-            localStorage.setItem(STATS_CACHE_KEY, JSON.stringify(statsObj));
 
             document.getElementById('rpt-total-spend').textContent = formatCurrency(tValue);
             document.getElementById('rpt-tokens-issued-today').textContent = tIssued;
@@ -837,7 +792,7 @@
 
     <main class="flex-grow flex flex-col relative">
         
-        <!-- LOADING VIEW (True Percentage Tracker) -->
+        <!-- LOADING VIEW (Restored Original Look) -->
         <div id="view-loading" class="fixed inset-0 z-[60] bg-[#0B1120] flex flex-col items-center justify-center transition-opacity duration-500">
             <div class="relative flex items-center justify-center mb-6">
                 <div class="absolute inline-flex h-32 w-32 rounded-full bg-[#a855f7] opacity-30 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite]"></div>
@@ -845,14 +800,6 @@
                 <div class="relative inline-flex rounded-full h-10 w-10 bg-[#a855f7] shadow-[0_0_30px_10px_rgba(168,85,247,0.8)]"></div>
             </div>
             <h2 class="text-white font-extrabold text-2xl tracking-tight z-10 relative mt-2">Loading Intelligence...</h2>
-            
-            <div class="w-48 sm:w-64 mt-6 bg-slate-800 rounded-full h-1.5 overflow-hidden shadow-inner border border-slate-700/50">
-                <div id="main-loading-bar" class="h-full bg-gradient-to-r from-[#a855f7] to-[#d8b4fe] w-0 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(168,85,247,0.8)]"></div>
-            </div>
-            <div class="mt-3 text-[10px] font-bold uppercase tracking-widest text-[#a855f7] flex items-center gap-2">
-                <span id="main-loading-text">Initializing Request</span>
-                <span class="bg-[#a855f7]/20 px-2 py-0.5 rounded font-mono"><span id="main-loading-percent">0</span>%</span>
-            </div>
         </div>
 
         <!-- UNAUTHORIZED VIEW -->
