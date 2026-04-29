@@ -98,10 +98,9 @@
         const STATS_CACHE_KEY = `ent_report_stats_${appId}`;
         let loggedInSysUser = null;
 
-        // Boot states
-        let isSysUsersLoaded = false;
-        let isTokensLoaded = false;
-        let initialRenderDone = false;
+        // Boot Synchronization States
+        let isDataReady = false;
+        let isTimeReady = false;
 
         document.documentElement.classList.add('dark');
 
@@ -138,37 +137,7 @@
             }, 3000);
         };
 
-        // --- True Loading Percentage System ---
-        let currentLoadPercent = 0;
-        window.setRealLoadingProgress = (percent, textStatus) => {
-            if (currentLoadPercent >= 100) return; 
-            currentLoadPercent = percent;
-            
-            const bar = document.getElementById('main-loading-bar');
-            const pct = document.getElementById('main-loading-percent');
-            const txt = document.getElementById('main-loading-text');
-            
-            if (bar) bar.style.width = percent + '%';
-            if (pct) pct.textContent = percent;
-            if (txt && textStatus) txt.textContent = textStatus;
-            
-            if (percent >= 100) {
-                setTimeout(() => {
-                    const loader = document.getElementById('view-loading');
-                    if (loader) {
-                        loader.classList.add('opacity-0');
-                        setTimeout(() => {
-                            loader.classList.add('hidden');
-                            document.getElementById('view-report').classList.remove('hidden');
-                            initialRenderDone = true;
-                            renderReportDashboard();
-                        }, 500);
-                    }
-                }, 600); 
-            }
-        };
-
-        // --- Live Sync Animation ---
+        // --- Live Sync Background Animation ---
         let syncTimeout;
         function triggerSyncAnimation() {
             const indicator = document.getElementById('sync-indicator');
@@ -209,7 +178,6 @@
         }
 
         const initAuth = async () => {
-            window.setRealLoadingProgress(10, 'Initializing Security Node');
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
@@ -223,56 +191,67 @@
             window.location.href = 'index.html';
         };
 
-        // Fast Boot from Memory Cache
-        const checkInstantBoot = () => {
-            const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
-            if (sessionStr) {
-                loggedInSysUser = JSON.parse(sessionStr);
-                
-                const cachedStatsStr = localStorage.getItem(STATS_CACHE_KEY);
-                if (cachedStatsStr) {
-                    try {
-                        const s = JSON.parse(cachedStatsStr);
-                        document.getElementById('rpt-total-spend').textContent = formatCurrency(s.tValue || 0);
-                        document.getElementById('rpt-tokens-issued-today').textContent = s.tIssued || 0;
-                        document.getElementById('rpt-tokens-consumed-today').textContent = s.tRedeemed || 0;
-                        document.getElementById('rpt-month-spend').textContent = formatCurrency(s.mValue || 0);
-                        document.getElementById('rpt-month-issued').textContent = s.mIssued || 0;
-                        document.getElementById('rpt-month-consumed').textContent = s.mRedeemed || 0;
-                    } catch(e) {}
-                }
-                
-                document.getElementById('view-loading').classList.add('hidden');
-                document.getElementById('view-report').classList.remove('hidden');
-                
-                document.getElementById('rpt-start').value = getTodayStr();
-                document.getElementById('rpt-end').value = getTodayStr();
-                
-                initialRenderDone = true;
-                return true;
-            }
-            return false;
-        };
+        // ============================================================
+        // STRICT 5-SECOND MANDATORY LOAD & WAIT ALGORITHM
+        // ============================================================
+        
+        function startBootSequence() {
+            isDataReady = false;
+            isTimeReady = false;
+            
+            // Lock User into Loading Screen
+            document.getElementById('view-login').classList.add('hidden');
+            document.getElementById('view-login').classList.remove('flex');
+            document.getElementById('view-report').classList.add('hidden');
+            
+            const loader = document.getElementById('view-loading');
+            loader.classList.remove('hidden');
+            loader.classList.remove('opacity-0');
+            
+            // Mandatory 5 Second Delay
+            setTimeout(() => {
+                isTimeReady = true;
+                attemptReveal();
+            }, 5000);
+            
+            loadData();
+        }
 
-        const didInstantBoot = checkInstantBoot();
+        function attemptReveal() {
+            // Unlocks ONLY when BOTH 5 seconds have passed AND Data is fully processed
+            if (isTimeReady && isDataReady) {
+                const loader = document.getElementById('view-loading');
+                if (loader) {
+                    loader.classList.add('opacity-0');
+                    setTimeout(() => {
+                        loader.classList.add('hidden');
+                        document.getElementById('view-report').classList.remove('hidden');
+                        
+                        const roleDisplay = document.getElementById('role-display');
+                        if(roleDisplay && loggedInSysUser) {
+                            roleDisplay.textContent = `${loggedInSysUser.name || 'Admin'} | ${loggedInSysUser.role || 'ADMIN'}`;
+                        }
+                    }, 500);
+                }
+            }
+        }
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
-                window.setRealLoadingProgress(30, 'Verifying Credentials');
-                
-                if (!didInstantBoot) {
-                    const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
-                    if (sessionStr) {
-                        loggedInSysUser = JSON.parse(sessionStr);
-                        document.getElementById('rpt-start').value = getTodayStr();
-                        document.getElementById('rpt-end').value = getTodayStr();
-                    } else {
-                        document.getElementById('view-loading').classList.add('hidden');
-                        document.getElementById('view-unauthorized').classList.remove('hidden');
-                        return;
-                    }
+                const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                if (sessionStr) {
+                    loggedInSysUser = JSON.parse(sessionStr);
+                    document.getElementById('rpt-start').value = getTodayStr();
+                    document.getElementById('rpt-end').value = getTodayStr();
+                    
+                    // Trigger the 5-second mandatory boot sequence
+                    startBootSequence();
+                } else {
+                    // Show login screen instantly
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-login').classList.remove('hidden');
+                    document.getElementById('view-login').classList.add('flex');
                 }
-                loadData();
             }
         });
 
@@ -281,27 +260,26 @@
         const loadData = () => {
             if (!auth.currentUser) return;
             
-            if (didInstantBoot) triggerSyncAnimation();
+            let pricesLoaded = false;
+            let tokensLoaded = false;
+            
+            const checkData = () => {
+                if (pricesLoaded && tokensLoaded) {
+                    renderReportDashboard(); // Processes Data to HTML
+                    isDataReady = true;      // Flags that Dashboard is 100% full
+                    attemptReveal();         // Checks if 5 seconds have passed yet
+                }
+            };
 
-            // 1. Single Point User Check
+            // 1. Single Point User Check (NO REDIRECTION BUG)
             if (loggedInSysUser && loggedInSysUser.username !== 'ADMIN') {
                 const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'system_users', loggedInSysUser.username);
                 onSnapshot(userRef, (docSnap) => {
-                    if (docSnap.exists() && docSnap.data().status === 'ACTIVE') {
-                        if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
-                    } else {
-                        // FIX: Safely show unauthorized instead of a hard crash redirect
-                        localStorage.removeItem(SYS_SESSION_KEY);
-                        document.getElementById('view-loading').classList.add('hidden');
-                        document.getElementById('view-report').classList.add('hidden');
-                        document.getElementById('view-unauthorized').classList.remove('hidden');
+                    // If document doesn't exist, safely log them out instead of throwing them to index.html
+                    if (!docSnap.metadata.fromCache && (!docSnap.exists() || docSnap.data().status !== 'ACTIVE')) {
+                        appLogout(); 
                     }
-                }, (err) => {
-                    console.error("System User fetch error:", err);
-                    if (!initialRenderDone) window.setRealLoadingProgress(45, 'Working Offline');
                 });
-            } else {
-                if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
             }
 
             // 2. Fetch Meal Prices
@@ -312,14 +290,14 @@
                     if (data.prices) dailyRates = data.prices;
                     else if (data.dailyRates) dailyRates = data.dailyRates;
                 }
-                if (!initialRenderDone) window.setRealLoadingProgress(60, 'Loading Financials');
-                else renderReportDashboard();
+                pricesLoaded = true;
+                checkData();
             }, (err) => {
                 console.error("Prices fetch error:", err);
-                if (!initialRenderDone) window.setRealLoadingProgress(60, 'Loading Financials');
+                pricesLoaded = true; checkData(); // Prevent Infinite Loading on Error
             });
 
-            // 3. Fast Data Loading: Fetch ONLY current month's tokens for the dashboard
+            // 3. Fast Data Loading: Fetch ONLY current month's tokens
             const currentMonthStart = getCurrentMonthStartStr();
             const qTokens = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', currentMonthStart));
             
@@ -327,17 +305,17 @@
                 loadedTokens = [];
                 snap.forEach(doc => { loadedTokens.push({ id: doc.id, ...doc.data() }); });
                 
-                if (!initialRenderDone) {
-                    window.setRealLoadingProgress(100, 'Intelligence Loaded');
+                if (!isDataReady) {
+                    tokensLoaded = true;
+                    checkData();
                 } else {
+                    // If the app is already open and data updates, just render and flash the sync bar
                     renderReportDashboard();
                     triggerSyncAnimation();
                 }
             }, (err) => {
                 console.error("Tokens fetch error:", err);
-                showToast("Failed to sync metrics.", "error");
-                // FAILSAFE: Ensure the loading screen unblocks even if data fails
-                if (!initialRenderDone) window.setRealLoadingProgress(100, 'Intelligence Loaded');
+                tokensLoaded = true; checkData(); // Prevent Infinite Loading on Error
             });
         };
 
@@ -534,6 +512,68 @@
                 `;
             });
         }
+
+        window.appLogin = async (e) => {
+            e.preventDefault();
+            const u = document.getElementById('login-username').value.trim().toUpperCase();
+            const p = document.getElementById('login-pin').value.trim();
+            
+            const btn = document.getElementById('login-btn');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-2"></i> Authenticating...';
+            btn.disabled = true;
+
+            // Master access
+            if (u === 'ADMIN' && p === 'ADMIN123') {
+                loggedInSysUser = { username: 'ADMIN', name: 'System Admin', role: 'ADMIN', status: 'ACTIVE' };
+                localStorage.setItem(SYS_SESSION_KEY, JSON.stringify({ username: 'ADMIN', name: 'System Admin', role: 'ADMIN', date: getTodayStr() }));
+                document.getElementById('login-error').classList.add('hidden');
+                
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+                
+                startBootSequence();
+                return;
+            }
+
+            // Database Auth
+            try {
+                const docSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'system_users', u));
+                if (docSnap.exists()) {
+                    const user = docSnap.data();
+                    if (user.pin === p && user.status === 'ACTIVE') {
+                        loggedInSysUser = user;
+                        localStorage.setItem(SYS_SESSION_KEY, JSON.stringify({ 
+                            username: u, 
+                            name: user.name,
+                            role: user.role,
+                            date: getTodayStr() 
+                        }));
+                        document.getElementById('login-error').classList.add('hidden');
+                        startBootSequence();
+                    } else {
+                        document.getElementById('login-error').classList.remove('hidden');
+                    }
+                } else {
+                    document.getElementById('login-error').classList.remove('hidden');
+                }
+            } catch (err) {
+                console.error("Login fetch error:", err);
+                showToast("Network Error: Could not verify user.", "error");
+            }
+            
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        };
+
+        window.appLogout = () => {
+            localStorage.removeItem(SYS_SESSION_KEY);
+            localStorage.removeItem(STATS_CACHE_KEY); 
+            loggedInSysUser = null;
+            document.getElementById('view-report').classList.add('hidden');
+            document.getElementById('view-login').classList.remove('hidden');
+            document.getElementById('view-login').classList.add('flex');
+        };
 
         // ============================================================
         //  REPORTS & EXPORTS (On-Demand Historical Fetching)
@@ -821,6 +861,7 @@
             </div>
             
             <div class="flex items-center gap-4">
+                <div id="role-display" class="hidden"></div>
                 <!-- Auto-Sync Loading Percentage Indicator -->
                 <div id="sync-indicator" class="hidden flex-col items-end gap-1.5 bg-[#a855f7]/10 border border-[#a855f7]/20 px-4 py-2 rounded-xl">
                     <div class="flex items-center text-[9px] uppercase tracking-widest text-[#d8b4fe] font-bold">
@@ -840,37 +881,69 @@
 
     <main class="flex-grow flex flex-col relative">
         
-        <!-- LOADING VIEW (Fixed Animation and Percentage Bar) -->
+        <!-- LOADING VIEW -->
         <div id="view-loading" class="fixed inset-0 z-[60] bg-[#0B1120] flex flex-col items-center justify-center transition-opacity duration-500">
             <div class="relative flex items-center justify-center mb-6">
+                <!-- Pinging ring -->
                 <div class="absolute inline-flex h-32 w-32 rounded-full bg-[#a855f7] opacity-30 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite]"></div>
-                <div class="absolute inline-flex h-24 w-24 rounded-full bg-[#a855f7] opacity-40 blur-xl"></div>
-                <!-- Requested Icon in the center -->
-                <div class="relative inline-flex items-center justify-center h-14 w-14 rounded-2xl bg-[#a855f7] shadow-[0_0_30px_10px_rgba(168,85,247,0.8)]">
+                <!-- Blurred background -->
+                <div class="absolute inline-flex h-20 w-20 rounded-full bg-[#a855f7] opacity-40 blur-xl"></div>
+                <!-- Rounded Square Pie Chart Icon from Screenshot -->
+                <div class="relative inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-[#a855f7] shadow-[0_0_30px_10px_rgba(168,85,247,0.8)]">
                     <i class="fas fa-chart-pie text-white text-3xl"></i>
                 </div>
             </div>
-            <h2 class="text-white font-extrabold text-2xl tracking-tight z-10 relative mt-4">Loading Intelligence...</h2>
-            
-            <div class="w-48 sm:w-64 mt-6 bg-slate-800 rounded-full h-1.5 overflow-hidden shadow-inner border border-slate-700/50">
-                <div id="main-loading-bar" class="h-full bg-gradient-to-r from-[#a855f7] to-[#d8b4fe] w-0 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(168,85,247,0.8)]"></div>
-            </div>
-            <div class="mt-3 text-[10px] font-bold uppercase tracking-widest text-[#a855f7] flex items-center gap-2">
-                <span id="main-loading-text">Initializing Request</span>
-                <span class="bg-[#a855f7]/20 px-2 py-0.5 rounded font-mono"><span id="main-loading-percent">0</span>%</span>
-            </div>
+            <h2 class="text-white font-extrabold text-2xl tracking-tight z-10 relative mt-2">Loading Intelligence...</h2>
         </div>
 
-        <!-- UNAUTHORIZED VIEW -->
-        <div id="view-unauthorized" class="hidden absolute inset-0 z-[55] bg-[#0B1120] flex-col items-center justify-center text-center px-6 animate-fade-in">
-            <div class="bg-[#131B2B] p-10 rounded-[2rem] border border-slate-800 shadow-2xl max-w-md w-full relative overflow-hidden">
-                <div class="absolute -top-20 -right-20 w-40 h-40 bg-red-500/10 rounded-full blur-3xl pointer-events-none"></div>
-                <i class="fas fa-shield-alt text-6xl text-red-500 mb-6 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]"></i>
-                <h2 class="text-2xl font-extrabold text-white mb-3">Access Denied</h2>
-                <p class="text-slate-400 text-sm mb-8 leading-relaxed font-medium">Valid session token missing. Please authenticate through the primary Enterprise Dashboard to access this terminal.</p>
-                <button onclick="goToDashboard()" class="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3.5 rounded-xl border border-slate-700 transition-colors text-sm tracking-wider uppercase shadow-sm">
-                    Return to Dashboard
-                </button>
+        <!-- LOGIN UI -->
+        <div id="view-login" class="fixed inset-0 z-50 bg-[#0B1120] hidden flex-col items-center justify-center animate-fade-in" style="background-image: linear-gradient(rgba(11, 17, 32, 0.85), rgba(11, 17, 32, 0.95)), url('https://i.ibb.co/xKvVg48C/Picsart-26-04-23-12-45-40-850.jpg'); background-size: cover; background-position: center;">
+            <div class="w-full max-w-[1000px] grid grid-cols-1 md:grid-cols-2 gap-12 p-8 items-center flex-grow relative z-10">
+                <!-- Left Content: Branding -->
+                <div class="flex flex-col items-start hidden md:flex animate-fade-in-up delay-100">
+                    <div class="bg-[#2563EB] w-16 h-16 rounded-2xl flex items-center justify-center shadow-[0_0_30px_rgba(37,99,235,0.4)] mb-6">
+                        <i class="fas fa-utensils text-white text-3xl"></i>
+                    </div>
+                    <h1 class="text-[2.75rem] font-extrabold text-white mb-0 tracking-tight leading-tight drop-shadow-lg">CanteenOS</h1>
+                    <h2 class="text-[2.75rem] font-extrabold text-[#3B82F6] mb-6 tracking-tight leading-tight drop-shadow-lg">Professional</h2>
+                    <p class="text-slate-300 text-sm leading-relaxed max-w-sm drop-shadow-md font-medium">
+                        Secure enterprise terminal access featuring real-time analytics and biometric photo verification, exclusively engineered for KDC & ALC facilities.
+                    </p>
+                </div>
+
+                <!-- Right Content: Login Form -->
+                <div class="w-full max-w-md mx-auto relative animate-fade-in-up delay-200">
+                    <div class="bg-[#131B2B]/90 backdrop-blur-xl border border-[#1F2937] rounded-[2rem] p-10 shadow-2xl relative z-10 overflow-hidden">
+                        <div class="absolute -top-24 -right-24 w-48 h-48 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                        
+                        <div class="text-center mb-10 relative z-20">
+                            <h2 class="text-2xl font-extrabold text-white mb-2">Terminal Access</h2>
+                            <p class="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Secure Terminal ID Required</p>
+                        </div>
+                        
+                        <form onsubmit="appLogin(event)" class="space-y-6 relative z-20">
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">TERMINAL ID</label>
+                                <input type="text" id="login-username" class="w-full px-4 py-3.5 border border-[#1F2937] rounded-xl bg-[#0B1120]/80 text-sm text-slate-200 focus:border-[#3B82F6] focus:ring-1 focus:ring-[#3B82F6] outline-none transition-all font-bold uppercase" required autocomplete="off">
+                            </div>
+
+                            <div>
+                                <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">SECRET KEY (ACCESS AUTH)</label>
+                                <input type="password" id="login-pin" class="w-full px-4 py-3.5 border border-[#1F2937] rounded-xl bg-[#0B1120]/80 text-sm text-slate-200 focus:border-[#3B82F6] focus:ring-1 focus:ring-[#3B82F6] outline-none transition-all tracking-widest shadow-inner" required autocomplete="off">
+                            </div>
+                            
+                            <div id="login-error" class="hidden text-red-400 text-xs text-center font-semibold bg-red-500/10 py-3 rounded-lg border border-red-500/20 flex items-center justify-center">
+                                <i class="fas fa-exclamation-circle mr-2"></i> Invalid credentials.
+                            </div>
+                            
+                            <div class="pt-4">
+                                <button type="submit" id="login-btn" class="w-full bg-[#2563EB] hover:bg-[#1D4ED8] text-white font-bold py-3.5 rounded-xl shadow-[0_0_20px_rgba(37,99,235,0.4)] transition-all transform active:scale-[0.98] text-sm tracking-wide">
+                                    Verify & Connect
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             </div>
             
             <div class="absolute bottom-6 w-full text-center z-20 pointer-events-none px-4">
