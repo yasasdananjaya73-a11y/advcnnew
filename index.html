@@ -160,18 +160,6 @@
             }, 3000);
         };
 
-        window.forceSync = () => {
-            showToast('Syncing with cloud database...', 'info');
-            if(isDataReady && auth.currentUser) {
-                calculateDashboardStats();
-                setTimeout(() => {
-                    showToast(`Dashboard Synced! Tracking active operations.`, 'success');
-                }, 800);
-            } else {
-                showToast('Connection pending...', 'error');
-            }
-        };
-
         document.documentElement.classList.add('dark'); 
 
         function showView(viewName) {
@@ -185,7 +173,9 @@
         function proceedToMenu() {
             showView('menu');
             navBar.classList.remove('hidden');
-            if(roleDisplay && loggedInSysUser) roleDisplay.textContent = `${loggedInSysUser.name} | ${loggedInSysUser.role}`;
+            if(roleDisplay && loggedInSysUser) {
+                roleDisplay.textContent = `${loggedInSysUser.name || 'Admin'} | ${loggedInSysUser.role || 'ADMIN'}`;
+            }
             
             const role = loggedInSysUser ? loggedInSysUser.role : '';
             
@@ -352,13 +342,17 @@
                 }
             };
 
-            // 1. Single Point User Check
+            // 1. Single Point User Check (NO AUTO-LOGOUT)
             if (loggedInSysUser && loggedInSysUser.username !== 'ADMIN') {
                 const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'system_users', loggedInSysUser.username);
                 onSnapshot(userRef, (docSnap) => {
-                    if (!docSnap.metadata.fromCache && (!docSnap.exists() || docSnap.data().status !== 'ACTIVE')) {
-                        appLogout(); 
+                    if (docSnap.exists() && docSnap.data().role) {
+                        loggedInSysUser.role = docSnap.data().role;
+                        localStorage.setItem(SYS_SESSION_KEY, JSON.stringify(loggedInSysUser));
                     }
+                    if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
+                }, (err) => {
+                    console.warn("User fetch warning:", err);
                     if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
                 });
             } else {
