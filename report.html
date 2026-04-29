@@ -64,16 +64,16 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, onSnapshot, doc, getDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, doc, getDoc, getDocs, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase Config
-        const appConfig = {
-            apiKey: import.meta.env?.VITE_FIREBASE_API_KEY || "",
-            authDomain: import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN || "",
-            projectId: import.meta.env?.VITE_FIREBASE_PROJECT_ID || "",
-            storageBucket: import.meta.env?.VITE_FIREBASE_STORAGE_BUCKET || "",
-            messagingSenderId: import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
-            appId: import.meta.env?.VITE_FIREBASE_APP_ID || ""
+        const appConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "AIzaSyDummyKeyForLocalEnvironment",
+            authDomain: "dummy.firebaseapp.com",
+            projectId: "dummy-project",
+            storageBucket: "dummy.appspot.com",
+            messagingSenderId: "123456789",
+            appId: "1:123456789:web:abcdef"
         };
 
         const app = initializeApp(appConfig);
@@ -206,7 +206,16 @@
             });
 
             const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
-            onSnapshot(aRef, (snap) => {
+            
+            // SPEED OPTIMIZATION: Only load the last ~35 days for the live dashboard
+            // This easily covers the current month KPIs and the 7-day trend chart.
+            const fetchDate = new Date();
+            fetchDate.setDate(fetchDate.getDate() - 35);
+            const fetchFromStr = fetchDate.toISOString().split('T')[0];
+            
+            const logsQuery = query(aRef, where('issuedDate', '>=', fetchFromStr));
+
+            onSnapshot(logsQuery, (snap) => {
                 attendanceLogs = [];
                 snap.forEach(doc => attendanceLogs.push({ id: doc.id, ...doc.data() }));
                 isLogsLoaded = true;
@@ -388,7 +397,8 @@
             window.print();
         };
 
-        window.generateReportPreview = () => {
+        // Make async to fetch data on demand for reporting (allows retrieving historical data easily)
+        window.generateReportPreview = async () => {
             const startDate = document.getElementById('rpt-start').value;
             const endDate = document.getElementById('rpt-end').value;
             const filterType = document.getElementById('rpt-filter-type').value;
@@ -397,127 +407,144 @@
 
             const modal = document.getElementById('report-preview-modal');
             const content = document.getElementById('report-preview-content');
+            
             modal.classList.remove('hidden');
+            content.innerHTML = '<div class="flex flex-col justify-center items-center h-64 text-slate-500"><i class="fas fa-circle-notch fa-spin text-4xl text-[#a855f7] mb-4"></i><span class="font-bold">Fetching Analytics Data...</span></div>';
             
-            let rows = "";
-            let count = 0;
-            let totalCost = 0;
-
-            const filteredLogs = attendanceLogs.filter(log => {
-                const logDate = log.issuedDate || log.date;
-                return logDate >= startDate && logDate <= endDate;
-            });
-            
-            filteredLogs.sort((a, b) => {
-                const tA = a.issuedAt?.toMillis ? a.issuedAt.toMillis() : (a.issuedAt?.seconds || 0);
-                const tB = b.issuedAt?.toMillis ? b.issuedAt.toMillis() : (b.issuedAt?.seconds || 0);
-                return tA - tB; 
-            });
-
-            filteredLogs.forEach(log => {
-                const emp = personnelMap[log.empId] || { name: log.empName, dept: log.dept, site: log.site, accountName: log.account, companyName: log.company };
-                const logDate = log.issuedDate || log.date;
-                const isConsumed = log.status === 'CONSUMED' || log.status === 'REDEEMED' || log.mealRedeemed === true;
+            try {
+                // Fetch data SPECIFICALLY for this report date range (supports historical retrieval)
+                const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
+                const q = query(aRef, where('issuedDate', '>=', startDate));
+                const snap = await getDocs(q);
                 
-                let cost = 0;
-                if (log.costs && typeof log.costs.total === 'number') {
-                    cost = isConsumed ? log.costs.total : 0;
-                } else {
-                    const dayName = getDayName(logDate);
-                    const rateForDay = parseFloat(dailyRates[dayName]) || 0;
-                    cost = isConsumed ? rateForDay : 0;
+                let reportLogs = [];
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    const logDate = data.issuedDate || data.date;
+                    if (logDate && logDate <= endDate) {
+                        reportLogs.push({ id: doc.id, ...data });
+                    }
+                });
+
+                let rows = "";
+                let count = 0;
+                let totalCost = 0;
+
+                reportLogs.sort((a, b) => {
+                    const tA = a.issuedAt?.toMillis ? a.issuedAt.toMillis() : (a.issuedAt?.seconds || 0);
+                    const tB = b.issuedAt?.toMillis ? b.issuedAt.toMillis() : (b.issuedAt?.seconds || 0);
+                    return tA - tB; 
+                });
+
+                reportLogs.forEach(log => {
+                    const emp = personnelMap[log.empId] || { name: log.empName, dept: log.dept, site: log.site, accountName: log.account, companyName: log.company };
+                    const logDate = log.issuedDate || log.date;
+                    const isConsumed = log.status === 'CONSUMED' || log.status === 'REDEEMED' || log.mealRedeemed === true;
+                    
+                    let cost = 0;
+                    if (log.costs && typeof log.costs.total === 'number') {
+                        cost = isConsumed ? log.costs.total : 0;
+                    } else {
+                        const dayName = getDayName(logDate);
+                        const rateForDay = parseFloat(dailyRates[dayName]) || 0;
+                        cost = isConsumed ? rateForDay : 0;
+                    }
+                    
+                    const dept = emp.department || emp.dept || '';
+                    const acct = emp.accountName || emp.account || 'CTE';
+                    const comp = emp.companyName || emp.company || '';
+                    const site = emp.site || '';
+
+                    if (filterType === 'DEPT' && !dept) return; 
+                    if (filterType === 'ACCT' && !acct) return;
+                    if (filterType === 'COMP' && !comp) return;
+                    if (filterType === 'SITE' && !site) return;
+                    if (filterType === 'CONSUMED_ONLY' && !isConsumed) return;
+                    
+                    let groupVal = '';
+                    if(filterType === 'DEPT') groupVal = dept;
+                    else if(filterType === 'ACCT') groupVal = acct;
+                    else if(filterType === 'COMP') groupVal = comp;
+                    else if(filterType === 'SITE') groupVal = site;
+
+                    let timeStr = '';
+                    if(log.issuedAt?.toDate) timeStr = log.issuedAt.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    else if (log.issuedAt?.seconds) timeStr = new Date(log.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+
+                    const statusStr = isConsumed ? 'REDEEMED' : 'CLEARED';
+
+                    rows += `
+                        <tr>
+                            <td>${logDate} ${timeStr}</td>
+                            <td>${emp.name || 'Unknown'}</td>
+                            <td>${log.empId}</td>
+                            <td>${dept}</td>
+                            <td>${site || '-'}</td>
+                            <td>${statusStr}</td>
+                            ${filterType !== 'ALL' && filterType !== 'CONSUMED_ONLY' ? `<td style="font-weight:bold; color:#a855f7;">${groupVal || '-'}</td>` : ''}
+                            <td style="text-align:right">${formatter.format(cost)}</td>
+                        </tr>
+                    `;
+                    totalCost += cost;
+                    count++;
+                });
+
+                if(count === 0) {
+                    content.innerHTML = '<div style="text-align:center; padding: 40px; color: #64748b; font-weight: bold;">No records found for the selected criteria.</div>';
+                    return;
                 }
-                
-                const dept = emp.department || emp.dept || '';
-                const acct = emp.accountName || emp.account || 'CTE';
-                const comp = emp.companyName || emp.company || '';
-                const site = emp.site || '';
 
-                if (filterType === 'DEPT' && !dept) return; 
-                if (filterType === 'ACCT' && !acct) return;
-                if (filterType === 'COMP' && !comp) return;
-                if (filterType === 'SITE' && !site) return;
-                if (filterType === 'CONSUMED_ONLY' && !isConsumed) return;
-                
-                let groupVal = '';
-                if(filterType === 'DEPT') groupVal = dept;
-                else if(filterType === 'ACCT') groupVal = acct;
-                else if(filterType === 'COMP') groupVal = comp;
-                else if(filterType === 'SITE') groupVal = site;
+                const extraHeader = (filterType !== 'ALL' && filterType !== 'CONSUMED_ONLY') ? `<th>${filterType}</th>` : '';
+                const colSpanCount = (filterType !== 'ALL' && filterType !== 'CONSUMED_ONLY') ? 7 : 6;
 
-                let timeStr = '';
-                if(log.issuedAt?.toDate) timeStr = log.issuedAt.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                else if (log.issuedAt?.seconds) timeStr = new Date(log.issuedAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-
-                const statusStr = isConsumed ? 'REDEEMED' : 'CLEARED';
-
-                rows += `
-                    <tr>
-                        <td>${logDate} ${timeStr}</td>
-                        <td>${emp.name || 'Unknown'}</td>
-                        <td>${log.empId}</td>
-                        <td>${dept}</td>
-                        <td>${site || '-'}</td>
-                        <td>${statusStr}</td>
-                        ${filterType !== 'ALL' && filterType !== 'CONSUMED_ONLY' ? `<td style="font-weight:bold; color:#a855f7;">${groupVal || '-'}</td>` : ''}
-                        <td style="text-align:right">${formatter.format(cost)}</td>
-                    </tr>
+                content.innerHTML = `
+                    <div class="print-mode-report">
+                        <div style="border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-end;">
+                            <div>
+                                <h1 style="font-size: 24px; font-weight: bold; margin: 0; text-transform: uppercase;">Enterprise Audit Report</h1>
+                                <div style="font-size: 14px; margin-top: 5px; color: #475569;">Filter Applied: ${filterType} | Period: ${startDate} to ${endDate}</div>
+                            </div>
+                            <div style="text-align: right; font-size: 12px; color: #475569;">
+                                <div>Generated: ${new Date().toLocaleString()}</div>
+                                <div>System Node: ${loggedInSysUser?.username || 'SYSTEM'}</div>
+                            </div>
+                        </div>
+                        
+                        <table class="report-table">
+                            <thead>
+                                <tr>
+                                    <th>Date/Time</th>
+                                    <th>Employee Name</th>
+                                    <th>Terminal ID</th>
+                                    <th>Department</th>
+                                    <th>Site</th>
+                                    <th>Status</th>
+                                    ${extraHeader}
+                                    <th style="text-align:right">Cost Liability</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                            <tfoot>
+                                <tr style="background-color: #f8fafc;">
+                                    <td colspan="${colSpanCount}" style="text-align:right; padding: 12px; font-weight: bold;">TOTAL EXPENDITURE:</td>
+                                    <td style="text-align:right; padding: 12px; font-weight: bold; font-size: 1.1em;">${formatter.format(totalCost)}</td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                        
+                        <div style="margin-top: 40px; font-size: 11px; text-align: center; color: #94a3b8; border-top: 1px dashed #cbd5e1; padding-top: 15px;">
+                            *** CONFIDENTIAL ENTERPRISE SYSTEM RECORD ***
+                        </div>
+                    </div>
                 `;
-                totalCost += cost;
-                count++;
-            });
-
-            if(count === 0) {
-                content.innerHTML = '<div style="text-align:center; padding: 40px; color: #64748b; font-weight: bold;">No records found for the selected criteria.</div>';
-                return;
+            } catch (error) {
+                console.error("Report Generation Error:", error);
+                content.innerHTML = '<div class="text-center p-10 text-red-500 font-bold"><i class="fas fa-exclamation-triangle text-3xl mb-3"></i><br>Failed to retrieve historical report data.</div>';
             }
-
-            const extraHeader = (filterType !== 'ALL' && filterType !== 'CONSUMED_ONLY') ? `<th>${filterType}</th>` : '';
-            const colSpanCount = (filterType !== 'ALL' && filterType !== 'CONSUMED_ONLY') ? 7 : 6;
-
-            content.innerHTML = `
-                <div class="print-mode-report">
-                    <div style="border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-end;">
-                        <div>
-                            <h1 style="font-size: 24px; font-weight: bold; margin: 0; text-transform: uppercase;">Enterprise Audit Report</h1>
-                            <div style="font-size: 14px; margin-top: 5px; color: #475569;">Filter Applied: ${filterType} | Period: ${startDate} to ${endDate}</div>
-                        </div>
-                        <div style="text-align: right; font-size: 12px; color: #475569;">
-                            <div>Generated: ${new Date().toLocaleString()}</div>
-                            <div>System Node: ${loggedInSysUser?.username || 'SYSTEM'}</div>
-                        </div>
-                    </div>
-                    
-                    <table class="report-table">
-                        <thead>
-                            <tr>
-                                <th>Date/Time</th>
-                                <th>Employee Name</th>
-                                <th>Terminal ID</th>
-                                <th>Department</th>
-                                <th>Site</th>
-                                <th>Status</th>
-                                ${extraHeader}
-                                <th style="text-align:right">Cost Liability</th>
-                            </tr>
-                        </thead>
-                        <tbody>${rows}</tbody>
-                        <tfoot>
-                            <tr style="background-color: #f8fafc;">
-                                <td colspan="${colSpanCount}" style="text-align:right; padding: 12px; font-weight: bold;">TOTAL EXPENDITURE:</td>
-                                <td style="text-align:right; padding: 12px; font-weight: bold; font-size: 1.1em;">${formatter.format(totalCost)}</td>
-                            </tr>
-                        </tfoot>
-                    </table>
-                    
-                    <div style="margin-top: 40px; font-size: 11px; text-align: center; color: #94a3b8; border-top: 1px dashed #cbd5e1; padding-top: 15px;">
-                        *** CONFIDENTIAL ENTERPRISE SYSTEM RECORD ***
-                    </div>
-                </div>
-            `;
         };
 
-        window.generateCSV = () => {
+        // Make async to fetch data on demand for accurate exports
+        window.generateCSV = async () => {
             const startDate = document.getElementById('rpt-start').value;
             const endDate = document.getElementById('rpt-end').value;
             const filterType = document.getElementById('rpt-filter-type').value; 
@@ -530,16 +557,25 @@
             btn.disabled = true;
 
             try {
+                // Fetch specifically for the CSV range
+                const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
+                const q = query(aRef, where('issuedDate', '>=', startDate));
+                const snap = await getDocs(q);
+                
+                let reportLogs = [];
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    const logDate = data.issuedDate || data.date;
+                    if (logDate && logDate <= endDate) {
+                        reportLogs.push({ id: doc.id, ...data });
+                    }
+                });
+
                 let csvHeaders = "Date,Time,Emp Name,Emp ID,Department,Site,Account,Company,Status,Cost Applied,Cleared By,Redeemed By\r\n";
                 let csvContent = "data:text/csv;charset=utf-8,\uFEFF" + csvHeaders;
                 let count = 0;
 
-                const filteredLogs = attendanceLogs.filter(log => {
-                    const logDate = log.issuedDate || log.date;
-                    return logDate >= startDate && logDate <= endDate;
-                });
-
-                filteredLogs.forEach(log => {
+                reportLogs.forEach(log => {
                     const emp = personnelMap[log.empId] || { name: log.empName, dept: log.dept, site: log.site, accountName: log.account, companyName: log.company };
                     const logDate = log.issuedDate || log.date;
                     const isConsumed = log.status === 'CONSUMED' || log.status === 'REDEEMED' || log.mealRedeemed === true;
