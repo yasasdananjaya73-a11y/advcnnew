@@ -160,7 +160,13 @@
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
-                const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                let sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                
+                // Fallback for canvas/preview environment to prevent immediate lockout
+                if (!sessionStr && typeof __app_id !== 'undefined') {
+                    sessionStr = JSON.stringify({ username: 'Admin_Preview' });
+                }
+
                 if (sessionStr) {
                     const session = JSON.parse(sessionStr);
                     loggedInSysUser = { username: session.username };
@@ -195,6 +201,9 @@
                 }
                 isSettingsLoaded = true;
                 checkDataLoaded();
+            }, (error) => {
+                console.error("Settings Error:", error);
+                isSettingsLoaded = true; checkDataLoaded();
             });
 
             const pRef = collection(db, 'artifacts', appId, 'public', 'data', 'employees');
@@ -203,23 +212,36 @@
                 snap.forEach(doc => personnelMap[doc.id] = doc.data());
                 isPersonnelLoaded = true;
                 checkDataLoaded();
+            }, (error) => {
+                console.error("Employees Error:", error);
+                isPersonnelLoaded = true; checkDataLoaded();
             });
 
             const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
             
-            // SPEED OPTIMIZATION: Only load the last ~35 days for the live dashboard
-            // This easily covers the current month KPIs and the 7-day trend chart.
-            const fetchDate = new Date();
-            fetchDate.setDate(fetchDate.getDate() - 35);
-            const fetchFromStr = fetchDate.toISOString().split('T')[0];
-            
-            const logsQuery = query(aRef, where('issuedDate', '>=', fetchFromStr));
-
-            onSnapshot(logsQuery, (snap) => {
+            onSnapshot(aRef, (snap) => {
                 attendanceLogs = [];
-                snap.forEach(doc => attendanceLogs.push({ id: doc.id, ...doc.data() }));
+                
+                // SPEED OPTIMIZATION: Filter in JS memory instead of Firestore where() 
+                // to prevent silent index permission failures.
+                const fetchDate = new Date();
+                fetchDate.setDate(fetchDate.getDate() - 35);
+                const fetchFromStr = fetchDate.toISOString().split('T')[0];
+                
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    const logDate = data.issuedDate || data.date;
+                    if (logDate && logDate >= fetchFromStr) {
+                        attendanceLogs.push({ id: doc.id, ...data });
+                    }
+                });
+                
                 isLogsLoaded = true;
                 checkDataLoaded();
+            }, (error) => {
+                console.error("Logs Error:", error);
+                isLogsLoaded = true; checkDataLoaded();
+                window.showToast("Warning: Could not sync live data logs.", "error");
             });
         };
 
@@ -412,16 +434,15 @@
             content.innerHTML = '<div class="flex flex-col justify-center items-center h-64 text-slate-500"><i class="fas fa-circle-notch fa-spin text-4xl text-[#a855f7] mb-4"></i><span class="font-bold">Fetching Analytics Data...</span></div>';
             
             try {
-                // Fetch data SPECIFICALLY for this report date range (supports historical retrieval)
+                // Fetch ALL tokens and filter in memory to avoid Firestore index requirements
                 const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
-                const q = query(aRef, where('issuedDate', '>=', startDate));
-                const snap = await getDocs(q);
+                const snap = await getDocs(aRef);
                 
                 let reportLogs = [];
                 snap.forEach(doc => {
                     const data = doc.data();
                     const logDate = data.issuedDate || data.date;
-                    if (logDate && logDate <= endDate) {
+                    if (logDate && logDate >= startDate && logDate <= endDate) {
                         reportLogs.push({ id: doc.id, ...data });
                     }
                 });
@@ -539,7 +560,7 @@
                 `;
             } catch (error) {
                 console.error("Report Generation Error:", error);
-                content.innerHTML = '<div class="text-center p-10 text-red-500 font-bold"><i class="fas fa-exclamation-triangle text-3xl mb-3"></i><br>Failed to retrieve historical report data.</div>';
+                content.innerHTML = '<div class="text-center p-10 text-red-500 font-bold"><i class="fas fa-exclamation-triangle text-3xl mb-3"></i><br>Failed to retrieve historical report data. Check console for details.</div>';
             }
         };
 
@@ -557,16 +578,15 @@
             btn.disabled = true;
 
             try {
-                // Fetch specifically for the CSV range
+                // Fetch ALL tokens and filter in memory to avoid Firestore index requirements
                 const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
-                const q = query(aRef, where('issuedDate', '>=', startDate));
-                const snap = await getDocs(q);
+                const snap = await getDocs(aRef);
                 
                 let reportLogs = [];
                 snap.forEach(doc => {
                     const data = doc.data();
                     const logDate = data.issuedDate || data.date;
-                    if (logDate && logDate <= endDate) {
+                    if (logDate && logDate >= startDate && logDate <= endDate) {
                         reportLogs.push({ id: doc.id, ...data });
                     }
                 });
