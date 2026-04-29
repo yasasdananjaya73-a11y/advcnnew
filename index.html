@@ -78,7 +78,7 @@
         try { firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {}; } catch(e) {}
         
         if (!firebaseConfig.apiKey) {
-            // Hardcoded configuration for GitHub Pages deployment
+            // Hardcoded configuration for standard deployment
             firebaseConfig = {
                 apiKey: "AIzaSyAfKp8gWavPxo5EZafetpeADh7eeRHQQx0",
                 authDomain: "canteen-2d80d.firebaseapp.com",
@@ -96,9 +96,7 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'canteen-os-live';
         
         // --- State Variables ---
-        let SYSTEM_USERS = {};
         let loggedInSysUser = null; 
-        
         let allTokens = [];
         let dailyRates = {
             "Sunday": 0, "Monday": 0, "Tuesday": 0, "Wednesday": 0,
@@ -196,10 +194,10 @@
             }
         }
 
-        // --- True Loading Percentage System ---
+        // --- True Loading Percentage System (Used for First Login Only) ---
         let currentLoadPercent = 0;
         window.setRealLoadingProgress = (percent, textStatus) => {
-            if (currentLoadPercent >= 100) return; 
+            if (currentLoadPercent >= 100 || initialRenderDone) return; 
             currentLoadPercent = percent;
             
             const bar = document.getElementById('main-loading-bar');
@@ -266,7 +264,7 @@
         }
 
         const initAuth = async () => {
-            window.setRealLoadingProgress(10, 'Initializing Security Node');
+            if (!initialRenderDone) window.setRealLoadingProgress(10, 'Initializing Security Node');
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
@@ -277,14 +275,48 @@
         };
 
         // ============================================================
-        // STRICT 5-SECOND MANDATORY LOAD & WAIT ALGORITHM
+        // 0-SECOND INSTANT BOOT CACHE ENGINE (Bypasses Loading Screen)
         // ============================================================
-        
+        const checkInstantBoot = () => {
+            const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+            if (sessionStr) {
+                const session = JSON.parse(sessionStr);
+                // Valid Session? Skip loader and show dashboard instantly.
+                if (session.date === getTodayStr() && session.role) {
+                    loggedInSysUser = session;
+                    
+                    const cachedStatsStr = localStorage.getItem(STATS_CACHE_KEY);
+                    if (cachedStatsStr) {
+                        try {
+                            const s = JSON.parse(cachedStatsStr);
+                            document.getElementById('stat-today-issued').textContent = s.tIssued || 0;
+                            document.getElementById('stat-today-redeemed').textContent = s.tRedeemed || 0;
+                            document.getElementById('stat-today-val').textContent = formatRs(s.tValue || 0);
+                            document.getElementById('stat-month-issued').textContent = s.mIssued || 0;
+                            document.getElementById('stat-month-redeemed').textContent = s.mRedeemed || 0;
+                            document.getElementById('stat-month-val').textContent = formatRs(s.mValue || 0);
+                        } catch(e) {}
+                    }
+                    
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-login').classList.add('hidden');
+                    proceedToMenu();
+                    initialRenderDone = true; // Prevents the 5-sec loader from triggering later
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const didInstantBoot = checkInstantBoot();
+
+        // ============================================================
+        // 5-SECOND MANDATORY LOAD & WAIT ALGORITHM (For First Login Only)
+        // ============================================================
         function startBootSequence() {
             isDataReady = false;
             isTimeReady = false;
             
-            // Lock User into Loading Screen
             document.getElementById('view-login').classList.add('hidden');
             document.getElementById('view-login').classList.remove('flex');
             document.getElementById('view-menu').classList.add('hidden');
@@ -293,7 +325,7 @@
             loader.classList.remove('hidden');
             loader.classList.remove('opacity-0');
             
-            // Mandatory 5 Second Delay minimum to ensure visuals
+            // Mandatory 5 Second Delay minimum to ensure visuals during initial login
             setTimeout(() => {
                 isTimeReady = true;
                 attemptReveal();
@@ -311,14 +343,30 @@
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
-                window.setRealLoadingProgress(30, 'Verifying Credentials');
-                const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
-                if (sessionStr) {
-                    loggedInSysUser = JSON.parse(sessionStr);
-                    // Trigger the 5-second mandatory boot sequence
-                    startBootSequence();
+                if (!didInstantBoot) {
+                    window.setRealLoadingProgress(30, 'Verifying Credentials');
+                    const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                    if (sessionStr) {
+                        const session = JSON.parse(sessionStr);
+                        if(session.date === getTodayStr()) {
+                            loggedInSysUser = session;
+                            startBootSequence();
+                        } else {
+                            document.getElementById('view-loading').classList.add('hidden');
+                            document.getElementById('view-login').classList.remove('hidden');
+                            document.getElementById('view-login').classList.add('flex');
+                        }
+                    } else {
+                        document.getElementById('view-loading').classList.add('hidden');
+                        document.getElementById('view-login').classList.remove('hidden');
+                        document.getElementById('view-login').classList.add('flex');
+                    }
                 } else {
-                    // Show login screen instantly
+                    // Dashboard is already visible (0-second load). Start quiet background sync.
+                    loadData();
+                }
+            } else {
+                if (!didInstantBoot) {
                     document.getElementById('view-loading').classList.add('hidden');
                     document.getElementById('view-login').classList.remove('hidden');
                     document.getElementById('view-login').classList.add('flex');
@@ -336,9 +384,9 @@
             
             const checkData = () => {
                 if (pricesLoaded && tokensLoaded) {
-                    calculateDashboardStats(); // Process Data to HTML immediately
-                    isDataReady = true;        // Flag that Dashboard is 100% full
-                    attemptReveal();           // Check if 5 seconds have passed yet
+                    calculateDashboardStats(); 
+                    isDataReady = true;        
+                    if (!initialRenderDone) attemptReveal(); 
                 }
             };
 
@@ -375,7 +423,7 @@
                 pricesLoaded = true; checkData(); 
             });
 
-            // 3. Fast Data Loading: Fetch ONLY current month's tokens
+            // 3. Fast Data Loading: Fetch ONLY current month's tokens for background sync
             const currentMonthStart = getCurrentMonthStartStr();
             const qTokens = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', currentMonthStart));
             
@@ -383,18 +431,20 @@
                 allTokens = [];
                 snap.forEach(doc => { allTokens.push(doc.data()); });
                 
-                if (!isDataReady) {
+                if (!isDataReady && !initialRenderDone) {
                     tokensLoaded = true;
-                    if (!initialRenderDone) window.setRealLoadingProgress(80, 'Processing Ledger');
+                    window.setRealLoadingProgress(80, 'Processing Ledger');
                     checkData();
                 } else {
-                    // If the app is already open and data updates live
+                    // Quiet Background Update (Dashboard already visible)
                     calculateDashboardStats();
                     triggerSyncAnimation();
                 }
             }, (err) => {
                 console.error("Tokens fetch error:", err);
-                tokensLoaded = true; checkData(); 
+                if (!isDataReady && !initialRenderDone) {
+                    tokensLoaded = true; checkData(); 
+                }
             });
         };
 
@@ -406,7 +456,6 @@
             let tIssued = 0, tRedeemed = 0, tValue = 0;
             let mIssued = 0, mRedeemed = 0, mValue = 0;
 
-            // Iteration through the filtered month data
             for(let i=0; i < allTokens.length; i++) {
                 const log = allTokens[i];
                 const logDateStr = log.issuedDate || log.date;
@@ -466,7 +515,7 @@
                 btn.innerHTML = originalText;
                 btn.disabled = false;
                 
-                startBootSequence();
+                startBootSequence(); // Trigger 5-sec loader on First Login
                 return;
             }
 
@@ -488,7 +537,7 @@
                         btn.innerHTML = originalText;
                         btn.disabled = false;
                         
-                        startBootSequence();
+                        startBootSequence(); // Trigger 5-sec loader on First Login
                     } else {
                         document.getElementById('login-error').classList.remove('hidden');
                         btn.innerHTML = originalText;
@@ -511,6 +560,7 @@
             localStorage.removeItem(SYS_SESSION_KEY);
             localStorage.removeItem(STATS_CACHE_KEY); // Clear cache on logout
             loggedInSysUser = null;
+            initialRenderDone = false; // Reset rendering state
             document.getElementById('view-menu').classList.add('hidden');
             navBar.classList.add('hidden');
             document.getElementById('view-login').classList.remove('hidden');
