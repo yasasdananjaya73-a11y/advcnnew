@@ -69,26 +69,24 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, query, onSnapshot, doc, getDoc, getDocs, setDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, doc, getDoc, getDocs, setDoc, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // ==========================================
         // FIREBASE CONFIGURATION
         // ==========================================
-        let firebaseConfig = {
-            apiKey: import.meta.env?.VITE_FIREBASE_API_KEY || "",
-            authDomain: import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN || "",
-            projectId: import.meta.env?.VITE_FIREBASE_PROJECT_ID || "",
-            storageBucket: import.meta.env?.VITE_FIREBASE_STORAGE_BUCKET || "",
-            messagingSenderId: import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
-            appId: import.meta.env?.VITE_FIREBASE_APP_ID || ""
-        };
-
-        try {
-            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-                firebaseConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
-            }
-        } catch(e) {
-            console.warn("Using local configuration.");
+        let firebaseConfig = {};
+        try { firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {}; } catch(e) {}
+        
+        if (!firebaseConfig.apiKey) {
+            // Hardcoded configuration for GitHub Pages deployment
+            firebaseConfig = {
+                apiKey: "AIzaSyAfKp8gWavPxo5EZafetpeADh7eeRHQQx0",
+                authDomain: "canteen-2d80d.firebaseapp.com",
+                projectId: "canteen-2d80d",
+                storageBucket: "canteen-2d80d.firebasestorage.app",
+                messagingSenderId: "835222412943",
+                appId: "1:835222412943:web:8db25547c45a1f0e1d5afa"
+            };
         }
 
         const app = initializeApp(firebaseConfig);
@@ -107,13 +105,13 @@
             "Thursday": 0, "Friday": 0, "Saturday": 0
         };
 
-        // Live Sync Unsubscribers
-        let unsubscribeSettings = null;
-        let unsubscribeTokens = null;
-        let unsubscribeSysUser = null;
-
         const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
-        const STATS_CACHE_KEY = `ent_dashboard_stats_${appId}`; 
+        const STATS_CACHE_KEY = `ent_dashboard_stats_${appId}`;
+
+        // Boot Synchronization States
+        let isDataReady = false;
+        let isTimeReady = false;
+        let initialRenderDone = false;
 
         const views = {
             login: document.getElementById('view-login'), 
@@ -128,8 +126,11 @@
             return 'Rs. ' + amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         }
         function getTodayStr() { 
-            return new Date().toISOString().split('T')[0];
+            const d = new Date();
+            const offsetDate = new Date(d.getTime() - (d.getTimezoneOffset() * 60000));
+            return offsetDate.toISOString().split('T')[0];
         }
+        function getCurrentMonthStartStr() { return getTodayStr().substring(0, 7) + '-01'; }
         function getDayName(dateString) {
             if (!dateString) return '';
             const parts = dateString.split('-');
@@ -145,7 +146,7 @@
             const container = document.getElementById('toast-container');
             const toast = document.createElement('div');
             
-            const bgClass = type === 'error' ? 'bg-red-500' : type === 'success' ? 'bg-green-500' : 'bg-blue-500';
+            const bgClass = type === 'error' ? 'bg-red-500' : type === 'success' ? 'bg-green-500' : 'bg-blue-600';
             const iconClass = type === 'error' ? 'fa-exclamation-circle' : type === 'success' ? 'fa-check-circle' : 'fa-info-circle';
             
             toast.className = `${bgClass} text-white px-5 py-3 rounded-xl shadow-lg flex items-center gap-3 transform transition-all duration-300 translate-x-[120%]`;
@@ -159,42 +160,17 @@
             }, 3000);
         };
 
-        // --- Visual Live Sync Progress Animation ---
-        window.syncAnimating = false;
-        function triggerSyncAnimation() {
-            const el = document.getElementById('sync-percent');
-            const bar = document.getElementById('sync-progress-bar');
-            const indicator = document.getElementById('sync-indicator');
-            
-            if (!el || !bar || !indicator) return;
-            
-            // Prevent restarting animation if one is already running
-            if (!indicator.classList.contains('hidden') && window.syncAnimating) return;
-            
-            indicator.classList.remove('hidden');
-            indicator.classList.add('flex');
-            window.syncAnimating = true;
-            
-            let p = 0;
-            el.textContent = '0%';
-            bar.style.width = '0%';
-            
-            clearInterval(window.syncInterval);
-            window.syncInterval = setInterval(() => {
-                p += Math.floor(Math.random() * 20) + 10; 
-                if (p >= 100) {
-                    p = 100;
-                    clearInterval(window.syncInterval);
-                    setTimeout(() => {
-                        indicator.classList.add('hidden');
-                        indicator.classList.remove('flex');
-                        window.syncAnimating = false;
-                    }, 1200); // Wait 1.2s at 100% before hiding
-                }
-                el.textContent = p + '%';
-                bar.style.width = p + '%';
-            }, 30); // Fast sweep speed
-        }
+        window.forceSync = () => {
+            showToast('Syncing with cloud database...', 'info');
+            if(isDataReady && auth.currentUser) {
+                calculateDashboardStats();
+                setTimeout(() => {
+                    showToast(`Dashboard Synced! Tracking active operations.`, 'success');
+                }, 800);
+            } else {
+                showToast('Connection pending...', 'error');
+            }
+        };
 
         document.documentElement.classList.add('dark'); 
 
@@ -209,9 +185,9 @@
         function proceedToMenu() {
             showView('menu');
             navBar.classList.remove('hidden');
-            if(roleDisplay) roleDisplay.textContent = `${loggedInSysUser.name} | ${loggedInSysUser.role}`;
+            if(roleDisplay && loggedInSysUser) roleDisplay.textContent = `${loggedInSysUser.name} | ${loggedInSysUser.role}`;
             
-            const role = loggedInSysUser.role;
+            const role = loggedInSysUser ? loggedInSysUser.role : '';
             
             document.getElementById('tile-attendance').classList.toggle('hidden', role !== 'ADMIN' && role !== 'SECURITY');
             document.getElementById('tile-canteen').classList.toggle('hidden', role !== 'ADMIN' && role !== 'CANTEEN');
@@ -230,114 +206,205 @@
             }
         }
 
-        // ==========================================
-        // ZERO-LOADING INSTANT BOOT LOGIC
-        // ==========================================
-        const checkInstantBoot = () => {
-            const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
-            if (sessionStr) {
-                const session = JSON.parse(sessionStr);
-                if (session.date === getTodayStr() && session.role) {
-                    loggedInSysUser = session;
-                    
-                    // Render cached stats instantly (0s loading)
-                    const cachedStatsStr = localStorage.getItem(STATS_CACHE_KEY);
-                    if (cachedStatsStr) {
-                        const s = JSON.parse(cachedStatsStr);
-                        document.getElementById('stat-today-issued').textContent = s.tIssued || 0;
-                        document.getElementById('stat-today-redeemed').textContent = s.tRedeemed || 0;
-                        document.getElementById('stat-today-val').textContent = formatRs(s.tValue || 0);
-                        document.getElementById('stat-month-issued').textContent = s.mIssued || 0;
-                        document.getElementById('stat-month-redeemed').textContent = s.mRedeemed || 0;
-                        document.getElementById('stat-month-val').textContent = formatRs(s.mValue || 0);
+        // --- True Loading Percentage System ---
+        let currentLoadPercent = 0;
+        window.setRealLoadingProgress = (percent, textStatus) => {
+            if (currentLoadPercent >= 100) return; 
+            currentLoadPercent = percent;
+            
+            const bar = document.getElementById('main-loading-bar');
+            const pct = document.getElementById('main-loading-percent');
+            const txt = document.getElementById('main-loading-text');
+            
+            if (bar) bar.style.width = percent + '%';
+            if (pct) pct.textContent = percent;
+            if (txt && textStatus) txt.textContent = textStatus;
+            
+            if (percent >= 100) {
+                setTimeout(() => {
+                    const loader = document.getElementById('view-loading');
+                    if (loader) {
+                        loader.classList.add('opacity-0');
+                        setTimeout(() => {
+                            loader.classList.add('hidden');
+                            proceedToMenu();
+                            initialRenderDone = true;
+                        }, 500);
                     }
-
-                    proceedToMenu();
-                    return true;
-                }
+                }, 600); 
             }
-            // Fallback: If no session, show login directly
-            showView('login');
-            navBar.classList.add('hidden');
-            return false;
         };
 
-        const didInstantBoot = checkInstantBoot();
+        // --- Live Sync Background Animation ---
+        let syncTimeout;
+        function triggerSyncAnimation() {
+            const indicator = document.getElementById('sync-indicator');
+            const bar = document.getElementById('sync-progress-bar');
+            const el = document.getElementById('sync-percent');
+            
+            if (!indicator || !bar || !el) return;
+            if (!indicator.classList.contains('hidden')) return;
+            
+            indicator.classList.remove('hidden');
+            indicator.classList.add('flex');
+            
+            bar.style.transition = 'none';
+            bar.style.width = '0%';
+            el.textContent = '0%';
+            
+            void bar.offsetWidth;
+            
+            bar.style.transition = 'width 0.8s ease-out';
+            bar.style.width = '100%';
+            
+            let p = 0;
+            const fastInterval = setInterval(() => {
+                p += 20;
+                if(p >= 100) {
+                    p = 100;
+                    clearInterval(fastInterval);
+                }
+                el.textContent = p + '%';
+            }, 100);
 
-        // --- Firebase Auth & Lightning Sync Architecture ---
+            clearTimeout(syncTimeout);
+            syncTimeout = setTimeout(() => {
+                indicator.classList.add('hidden');
+                indicator.classList.remove('flex');
+                clearInterval(fastInterval);
+            }, 1500); 
+        }
+
         const initAuth = async () => {
+            window.setRealLoadingProgress(10, 'Initializing Security Node');
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 } else {
                     await signInAnonymously(auth);
                 }
-            } catch (err) {
-                console.error("Auth Error:", err);
-            }
+            } catch (err) { console.error("Auth Error:", err); }
         };
 
-        const startLiveSync = () => {
-            // 1. Point-to-Point Sync: Only listen to the logged-in user's exact document
+        // ============================================================
+        // STRICT 5-SECOND MANDATORY LOAD & WAIT ALGORITHM
+        // ============================================================
+        
+        function startBootSequence() {
+            isDataReady = false;
+            isTimeReady = false;
+            
+            // Lock User into Loading Screen
+            document.getElementById('view-login').classList.add('hidden');
+            document.getElementById('view-login').classList.remove('flex');
+            document.getElementById('view-menu').classList.add('hidden');
+            
+            const loader = document.getElementById('view-loading');
+            loader.classList.remove('hidden');
+            loader.classList.remove('opacity-0');
+            
+            // Mandatory 5 Second Delay minimum to ensure visuals
+            setTimeout(() => {
+                isTimeReady = true;
+                attemptReveal();
+            }, 5000);
+            
+            loadData();
+        }
+
+        function attemptReveal() {
+            // Unlocks ONLY when BOTH 5 seconds have passed AND Data is fully processed
+            if (isTimeReady && isDataReady && !initialRenderDone) {
+                window.setRealLoadingProgress(100, 'Intelligence Loaded');
+            }
+        }
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                window.setRealLoadingProgress(30, 'Verifying Credentials');
+                const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                if (sessionStr) {
+                    loggedInSysUser = JSON.parse(sessionStr);
+                    // Trigger the 5-second mandatory boot sequence
+                    startBootSequence();
+                } else {
+                    // Show login screen instantly
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-login').classList.remove('hidden');
+                    document.getElementById('view-login').classList.add('flex');
+                }
+            }
+        });
+
+        initAuth();
+
+        const loadData = () => {
+            if (!auth.currentUser) return;
+            
+            let pricesLoaded = false;
+            let tokensLoaded = false;
+            
+            const checkData = () => {
+                if (pricesLoaded && tokensLoaded) {
+                    calculateDashboardStats(); // Process Data to HTML immediately
+                    isDataReady = true;        // Flag that Dashboard is 100% full
+                    attemptReveal();           // Check if 5 seconds have passed yet
+                }
+            };
+
+            // 1. Single Point User Check
             if (loggedInSysUser && loggedInSysUser.username !== 'ADMIN') {
                 const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'system_users', loggedInSysUser.username);
-                unsubscribeSysUser = onSnapshot(userRef, (docSnap) => {
-                    if (!docSnap.exists() || docSnap.data().status !== 'ACTIVE') {
-                        appLogout();
-                    } else {
-                        const sysUser = docSnap.data();
-                        if (sysUser.role !== loggedInSysUser.role) {
-                            loggedInSysUser = sysUser;
-                            localStorage.setItem(SYS_SESSION_KEY, JSON.stringify({ 
-                                username: sysUser.username, name: sysUser.name, role: sysUser.role, date: getTodayStr() 
-                            }));
-                            proceedToMenu();
-                        }
+                onSnapshot(userRef, (docSnap) => {
+                    if (!docSnap.metadata.fromCache && (!docSnap.exists() || docSnap.data().status !== 'ACTIVE')) {
+                        appLogout(); 
                     }
+                    if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
                 });
+            } else {
+                if (!initialRenderDone) window.setRealLoadingProgress(45, 'Establishing Link');
             }
 
-            // 2. Sync Global Prices
+            // 2. Fetch Meal Prices
             const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'meal_prices');
-            unsubscribeSettings = onSnapshot(settingsRef, (docSnap) => {
+            onSnapshot(settingsRef, (docSnap) => {
                 if (docSnap.exists()) {
                     const data = docSnap.data();
                     if (data.prices) dailyRates = data.prices;
                     else if (data.dailyRates) dailyRates = data.dailyRates;
                 }
-                calculateDashboardStats();
+                pricesLoaded = true;
+                if (!initialRenderDone) window.setRealLoadingProgress(60, 'Loading Financials');
+                checkData();
+            }, (err) => {
+                console.error("Prices fetch error:", err);
+                pricesLoaded = true; checkData(); 
             });
 
-            // 3. Fast In-Memory Token Filter Sync
-            const tokensRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
-            unsubscribeTokens = onSnapshot(tokensRef, (snap) => {
+            // 3. Fast Data Loading: Fetch ONLY current month's tokens
+            const currentMonthStart = getCurrentMonthStartStr();
+            const qTokens = query(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), where('issuedDate', '>=', currentMonthStart));
+            
+            onSnapshot(qTokens, (snap) => {
                 allTokens = [];
-                const todayStr = getTodayStr();
-                const currentMonthStart = todayStr.substring(0, 7) + '-01';
+                snap.forEach(doc => { allTokens.push(doc.data()); });
                 
-                snap.forEach(doc => {
-                    const data = doc.data();
-                    const logDateStr = data.issuedDate || data.date;
-                    // Strict client-side filter drops dead data instantly
-                    if (logDateStr && logDateStr >= currentMonthStart) {
-                        allTokens.push(data);
-                    }
-                });
-                calculateDashboardStats();
+                if (!isDataReady) {
+                    tokensLoaded = true;
+                    if (!initialRenderDone) window.setRealLoadingProgress(80, 'Processing Ledger');
+                    checkData();
+                } else {
+                    // If the app is already open and data updates live
+                    calculateDashboardStats();
+                    triggerSyncAnimation();
+                }
+            }, (err) => {
+                console.error("Tokens fetch error:", err);
+                tokensLoaded = true; checkData(); 
             });
         };
 
-        // Standard init path
-        initAuth();
-        
-        onAuthStateChanged(auth, (user) => {
-            document.getElementById('view-loading').classList.add('hidden'); // Drop loader if it somehow got stuck
-            if (user && loggedInSysUser) {
-                startLiveSync();
-            }
-        });
-
-        // Memory Cacher Engine
+        // Fast Data Processor & Memory Cacher
         function calculateDashboardStats() {
             const todayStr = getTodayStr();
             const monthStr = todayStr.substring(0, 7);
@@ -345,13 +412,23 @@
             let tIssued = 0, tRedeemed = 0, tValue = 0;
             let mIssued = 0, mRedeemed = 0, mValue = 0;
 
+            // Iteration through the filtered month data
             for(let i=0; i < allTokens.length; i++) {
                 const log = allTokens[i];
                 const logDateStr = log.issuedDate || log.date;
-                if (!logDateStr || logDateStr < monthStr) continue; 
+                
+                if (!logDateStr) continue; 
 
                 const isRedeemed = log.status === 'CONSUMED' || log.status === 'REDEEMED' || log.mealRedeemed === true;
-                let rateForDay = log.costs?.total ?? (parseFloat(dailyRates[getDayName(logDateStr)]) || 0);
+                
+                let rateForDay = 0;
+                if (log.costs && typeof log.costs.total === 'number') {
+                    rateForDay = log.costs.total;
+                } else if (log.costApplied) {
+                    rateForDay = log.costApplied;
+                } else {
+                    rateForDay = parseFloat(dailyRates[getDayName(logDateStr)]) || 0;
+                }
 
                 if (logDateStr === todayStr) {
                     tIssued++;
@@ -374,9 +451,6 @@
             document.getElementById('stat-month-issued').textContent = mIssued;
             document.getElementById('stat-month-redeemed').textContent = mRedeemed;
             document.getElementById('stat-month-val').textContent = formatRs(mValue);
-
-            // Fire the sync animation UI to let user know data updated
-            triggerSyncAnimation();
         }
 
         window.appLogin = async (e) => {
@@ -394,14 +468,15 @@
                 loggedInSysUser = { username: 'ADMIN', name: 'System Admin', role: 'ADMIN', status: 'ACTIVE' };
                 localStorage.setItem(SYS_SESSION_KEY, JSON.stringify({ username: 'ADMIN', name: 'System Admin', role: 'ADMIN', date: getTodayStr() }));
                 document.getElementById('login-error').classList.add('hidden');
-                proceedToMenu();
-                startLiveSync(); // Kick off sync instantly
+                
                 btn.innerHTML = originalText;
                 btn.disabled = false;
+                
+                startBootSequence();
                 return;
             }
 
-            // Fast Point-to-Point Database Pull
+            // Database Auth
             try {
                 const docSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'system_users', u));
                 if (docSnap.exists()) {
@@ -415,32 +490,37 @@
                             date: getTodayStr() 
                         }));
                         document.getElementById('login-error').classList.add('hidden');
-                        proceedToMenu();
-                        startLiveSync(); // Boot sync engine
+                        
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
+                        
+                        startBootSequence();
                     } else {
                         document.getElementById('login-error').classList.remove('hidden');
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
                     }
                 } else {
                     document.getElementById('login-error').classList.remove('hidden');
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
                 }
             } catch (err) {
                 console.error("Login fetch error:", err);
                 showToast("Network Error: Could not verify user.", "error");
+                btn.innerHTML = originalText;
+                btn.disabled = false;
             }
-            
-            btn.innerHTML = originalText;
-            btn.disabled = false;
         };
 
         window.appLogout = () => {
             localStorage.removeItem(SYS_SESSION_KEY);
-            localStorage.removeItem(STATS_CACHE_KEY); 
+            localStorage.removeItem(STATS_CACHE_KEY); // Clear cache on logout
             loggedInSysUser = null;
-            if(unsubscribeSysUser) unsubscribeSysUser();
-            if(unsubscribeSettings) unsubscribeSettings();
-            if(unsubscribeTokens) unsubscribeTokens();
-            showView('login');
+            document.getElementById('view-menu').classList.add('hidden');
             navBar.classList.add('hidden');
+            document.getElementById('view-login').classList.remove('hidden');
+            document.getElementById('view-login').classList.add('flex');
         };
 
         window.openModule = (path) => {
@@ -577,22 +657,31 @@
 
     <main class="flex-grow flex flex-col relative">
         
-        <!-- LOADING VIEW -->
-        <div id="view-loading" class="fixed inset-0 z-[60] bg-slate-950 hidden flex-col items-center justify-center transition-opacity duration-500">
+        <!-- LOADING VIEW (True Percentage Tracker) -->
+        <div id="view-loading" class="fixed inset-0 z-[60] bg-slate-950 flex flex-col items-center justify-center transition-opacity duration-500">
             <div class="relative flex items-center justify-center mb-6">
-                <div class="absolute animate-ping inline-flex h-24 w-24 rounded-full bg-blue-500 opacity-20"></div>
-                <div class="relative inline-flex rounded-full h-16 w-16 bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/50 flex items-center justify-center text-white p-2.5 overflow-hidden">
+                <!-- Pinging ring -->
+                <div class="absolute inline-flex h-32 w-32 rounded-full bg-blue-500 opacity-30 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite]"></div>
+                <!-- Blurred background -->
+                <div class="absolute inline-flex h-20 w-20 rounded-full bg-blue-600 opacity-40 blur-xl"></div>
+                <!-- Rounded Square Utensils Icon -->
+                <div class="relative inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-[0_0_30px_10px_rgba(59,130,246,0.5)]">
                     <i class="fas fa-utensils text-white text-3xl"></i>
                 </div>
             </div>
-            <div class="text-center space-y-2">
-                <h2 class="text-white font-extrabold text-3xl tracking-tight">CanteenOS <span class="text-blue-500">Pro</span></h2>
-                <p class="text-blue-400 text-xs uppercase tracking-[0.25em] font-semibold animate-pulse">Initializing System...</p>
+            <h2 class="text-white font-extrabold text-2xl tracking-tight z-10 relative mt-2">Loading System...</h2>
+            
+            <div class="w-48 sm:w-64 mt-6 bg-slate-800 rounded-full h-1.5 overflow-hidden shadow-inner border border-slate-700/50">
+                <div id="main-loading-bar" class="h-full bg-gradient-to-r from-blue-600 to-indigo-500 w-0 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(59,130,246,0.8)]"></div>
+            </div>
+            <div class="mt-3 text-[10px] font-bold uppercase tracking-widest text-blue-400 flex items-center gap-2">
+                <span id="main-loading-text">Initializing Request</span>
+                <span class="bg-blue-500/20 px-2 py-0.5 rounded font-mono"><span id="main-loading-percent">0</span>%</span>
             </div>
         </div>
 
         <!-- LOGIN UI -->
-        <div id="view-login" class="fixed inset-0 z-50 bg-[#0B1120] hidden flex flex-col items-center justify-center animate-fade-in" style="background-image: linear-gradient(rgba(11, 17, 32, 0.85), rgba(11, 17, 32, 0.95)), url('https://i.ibb.co/xKvVg48C/Picsart-26-04-23-12-45-40-850.jpg'); background-size: cover; background-position: center;">
+        <div id="view-login" class="fixed inset-0 z-50 bg-[#0B1120] hidden flex-col items-center justify-center animate-fade-in" style="background-image: linear-gradient(rgba(11, 17, 32, 0.85), rgba(11, 17, 32, 0.95)), url('https://i.ibb.co/xKvVg48C/Picsart-26-04-23-12-45-40-850.jpg'); background-size: cover; background-position: center;">
             <div class="w-full max-w-[1000px] grid grid-cols-1 md:grid-cols-2 gap-12 p-8 items-center flex-grow relative z-10">
                 <!-- Left Content: Branding -->
                 <div class="flex flex-col items-start hidden md:flex animate-fade-in-up delay-100">
